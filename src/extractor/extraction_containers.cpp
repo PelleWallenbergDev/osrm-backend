@@ -389,8 +389,6 @@ ExtractionContainers::ExtractionContainers()
     name_offsets.push_back(0);
     // Insert the total length sentinel (corresponds to the next name string offset)
     name_offsets.push_back(0);
-    // Sentinel for offset into used_nodes
-    way_node_id_offsets.push_back(0);
 }
 
 /**
@@ -410,7 +408,7 @@ void ExtractionContainers::PrepareData(ScriptingEnvironment &scripting_environme
 {
     const auto restriction_ways = IdentifyRestrictionWays();
     const auto maneuver_override_ways = IdentifyManeuverOverrideWays();
-    scripting_environment.m_obstacle_map.preProcess(used_node_id_list, way_node_id_offsets);
+    scripting_environment.m_obstacle_map.preProcess(raw_way_nodes.node_ids, raw_way_nodes.node_offsets);
 
     PrepareNodes();
     PrepareEdges(scripting_environment);
@@ -437,6 +435,8 @@ void ExtractionContainers::WriteCharData(const std::string &file_name)
 
 void ExtractionContainers::PrepareNodes()
 {
+    used_node_id_list.assign(raw_way_nodes.node_ids.begin(), raw_way_nodes.node_ids.end());
+
     {
         util::UnbufferedLog log;
         log << "Sorting used nodes        ... " << std::flush;
@@ -918,15 +918,19 @@ ExtractionContainers::ReferencedWays ExtractionContainers::IdentifyManeuverOverr
         auto itr = maneuver_override_ways.find(way_id);
         if (itr != maneuver_override_ways.end())
         {
-            auto node_start_itr = used_node_id_list.begin() + way_node_id_offsets[way_list_idx];
-            auto node_end_itr = used_node_id_list.begin() + way_node_id_offsets[way_list_idx + 1];
+            auto node_start_itr =
+                raw_way_nodes.node_ids.begin() +
+                static_cast<std::ptrdiff_t>(raw_way_nodes.node_offsets[way_list_idx]);
+            auto node_end_itr =
+                raw_way_nodes.node_ids.begin() +
+                static_cast<std::ptrdiff_t>(raw_way_nodes.node_offsets[way_list_idx + 1]);
             itr->second = NodesOfWay(way_id, std::vector<OSMNodeID>(node_start_itr, node_end_itr));
         }
     };
 
     // Then, populate the values in that hashtable for only the ways
     // referenced
-    util::for_each_indexed(ways_list, set_ids);
+    util::for_each_indexed(raw_way_nodes.way_ids, set_ids);
 
     TIMER_STOP(identify_maneuver_override_ways);
     log << "ok, after " << TIMER_SEC(identify_maneuver_override_ways) << "s";
@@ -1105,15 +1109,17 @@ ExtractionContainers::ReferencedWays ExtractionContainers::IdentifyRestrictionWa
         if (itr != restriction_ways.end())
         {
             const auto node_start_offset =
-                used_node_id_list.begin() + way_node_id_offsets[way_list_idx];
+                raw_way_nodes.node_ids.begin() +
+                static_cast<std::ptrdiff_t>(raw_way_nodes.node_offsets[way_list_idx]);
             const auto node_end_offset =
-                used_node_id_list.begin() + way_node_id_offsets[way_list_idx + 1];
+                raw_way_nodes.node_ids.begin() +
+                static_cast<std::ptrdiff_t>(raw_way_nodes.node_offsets[way_list_idx + 1]);
             itr->second =
                 NodesOfWay(way_id, std::vector<OSMNodeID>(node_start_offset, node_end_offset));
         }
     };
 
-    util::for_each_indexed(ways_list, set_ids);
+    util::for_each_indexed(raw_way_nodes.way_ids, set_ids);
     TIMER_STOP(identify_restriction_ways);
     log << "ok, after " << TIMER_SEC(identify_restriction_ways) << "s";
 

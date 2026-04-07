@@ -65,7 +65,8 @@ struct ExtractorConfig final : storage::IOConfig
                ".osrm.icd",
                ".osrm.cnbg",
                ".osrm.cnbg_to_ebg",
-               ".osrm.maneuver_overrides"})
+               ".osrm.maneuver_overrides",
+               ".osrm.link_map"})
     {
     }
 
@@ -87,6 +88,7 @@ struct ExtractorConfig final : storage::IOConfig
     bool parse_conditionals = false;
     bool use_locations_cache = true;
     bool dump_nbg_graph = false;
+    bool emit_link_map = false;
 };
 } // namespace osrm::extractor
 

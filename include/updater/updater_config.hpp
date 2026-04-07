@@ -31,6 +31,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "storage/io_config.hpp"
 #include "storage/storage_config.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -51,8 +52,11 @@ struct UpdaterConfig final : storage::IOConfig
                     ".osrm.properties",
                     ".osrm.restrictions",
                     ".osrm.enw"},
-                   {},
-                   {".osrm.datasource_names"}),
+                   {".osrm.link_map"},
+                   {".osrm.datasource_names",
+                    ".osrm.temporal_index",
+                    ".osrm.temporal_profiles",
+                    ".osrm.temporal_meta"}),
           valid_now(0)
     {
     }
@@ -66,7 +70,14 @@ struct UpdaterConfig final : storage::IOConfig
     std::time_t valid_now;
 
     std::vector<std::string> segment_speed_lookup_paths;
+    std::vector<std::string> hit_fcd_lookup_paths;
+    std::vector<std::string> segment_temporal_lookup_paths;
     std::vector<std::string> turn_penalty_lookup_paths;
+    bool write_temporal_sidecar = false;
+    std::uint32_t temporal_bucket_size_minutes = 15;
+    std::uint32_t temporal_week_bucket_count = 672;
+    std::uint32_t hit_fcd_forward_direction = 1;
+    std::uint32_t hit_fcd_reverse_direction = 2;
     std::string tz_file_path;
 };
 } // namespace osrm::updater

@@ -6,6 +6,7 @@
 #include "extractor/query_node.hpp"
 #include "extractor/restriction.hpp"
 #include "extractor/scripting_environment.hpp"
+#include "extractor/way_node_storage.hpp"
 
 #include "storage/tar_fwd.hpp"
 
@@ -44,8 +45,6 @@ class ExtractionContainers
     using AnnotationDataVector = std::vector<NodeBasedEdgeAnnotation>;
     using NameCharData = std::vector<unsigned char>;
     using NameOffsets = std::vector<size_t>;
-    using WayIDVector = std::vector<OSMWayID>;
-    using WayNodeIDOffsets = std::vector<size_t>;
 
     NodeIDVector used_node_id_list;
     NodeVector all_nodes_list;
@@ -53,9 +52,7 @@ class ExtractionContainers
     AnnotationDataVector all_edges_annotation_data_list;
     NameCharData name_char_data;
     NameOffsets name_offsets;
-    WayIDVector ways_list;
-    // Offsets into used nodes for each way_list entry
-    WayNodeIDOffsets way_node_id_offsets;
+    WayNodeStorage raw_way_nodes;
 
     unsigned max_internal_node_id;
 

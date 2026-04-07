@@ -7,6 +7,7 @@
 
 #include <boost/program_options.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <set>
@@ -42,11 +43,23 @@ return_code parseArguments(int argc,
          boost::program_options::value<unsigned int>(&customization_config.requested_num_threads)
              ->default_value(std::thread::hardware_concurrency()),
          "Number of threads to use")(
+            "hit-fcd-file",
+            boost::program_options::value<std::vector<std::string>>(
+                &customization_config.updater_config.hit_fcd_lookup_paths)
+                ->composing(),
+            "Tab-delimited HIT floating-car-data files with Link_id, Link_Direction, Timestamp, "
+            "Speed, UniqueEntries columns")(
             "segment-speed-file",
             boost::program_options::value<std::vector<std::string>>(
                 &customization_config.updater_config.segment_speed_lookup_paths)
                 ->composing(),
             "Lookup files containing nodeA, nodeB, speed data to adjust edge weights")(
+            "segment-temporal-file",
+            boost::program_options::value<std::vector<std::string>>(
+                &customization_config.updater_config.segment_temporal_lookup_paths)
+                ->composing(),
+            "Lookup files containing from_osm_id, to_osm_id, direction, week_bucket, value data "
+            "to build temporal segment profiles")(
             "turn-penalty-file",
             boost::program_options::value<std::vector<std::string>>(
                 &customization_config.updater_config.turn_penalty_lookup_paths)
@@ -66,6 +79,31 @@ return_code parseArguments(int argc,
             "Optional for conditional turn restriction parsing, provide a UTC time stamp from "
             "which "
             "to evaluate the validity of conditional turn restrictions")(
+            "write-temporal-sidecar",
+            boost::program_options::value<bool>(
+                &customization_config.updater_config.write_temporal_sidecar)
+                ->default_value(true),
+            "Write optional temporal sidecar files alongside the customized MLD output")(
+            "temporal-bucket-size-minutes",
+            boost::program_options::value<std::uint32_t>(
+                &customization_config.updater_config.temporal_bucket_size_minutes)
+                ->default_value(15),
+            "Bucket size, in minutes, for temporal profiles")(
+            "temporal-week-bucket-count",
+            boost::program_options::value<std::uint32_t>(
+                &customization_config.updater_config.temporal_week_bucket_count)
+                ->default_value(672),
+            "Number of temporal buckets stored per week")(
+            "hit-fcd-forward-direction",
+            boost::program_options::value<std::uint32_t>(
+                &customization_config.updater_config.hit_fcd_forward_direction)
+                ->default_value(1),
+            "Raw Link_Direction value that should be interpreted as forward along the OSM way")(
+            "hit-fcd-reverse-direction",
+            boost::program_options::value<std::uint32_t>(
+                &customization_config.updater_config.hit_fcd_reverse_direction)
+                ->default_value(2),
+            "Raw Link_Direction value that should be interpreted as reverse along the OSM way")(
             "time-zone-file",
             boost::program_options::value<std::string>(
                 &customization_config.updater_config.tz_file_path)
@@ -110,19 +148,19 @@ return_code parseArguments(int argc,
         return return_code::fail;
     }
 
-    if (option_variables.contains("version"))
+    if (option_variables.count("version") > 0)
     {
         std::cout << OSRM_VERSION << std::endl;
         return return_code::exit;
     }
 
-    if (option_variables.contains("help"))
+    if (option_variables.count("help") > 0)
     {
         std::cout << visible_options;
         return return_code::exit;
     }
 
-    if (option_variables.contains("list-inputs"))
+    if (option_variables.count("list-inputs") > 0)
     {
         customizer::CustomizationConfig config;
         std::set<std::string> seen;
@@ -133,7 +171,7 @@ return_code parseArguments(int argc,
 
     boost::program_options::notify(option_variables);
 
-    if (!option_variables.contains("input"))
+    if (option_variables.count("input") == 0)
     {
         std::cout << visible_options;
         return return_code::fail;

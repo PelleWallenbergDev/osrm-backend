@@ -9,6 +9,7 @@
 #include "extractor/extraction_way.hpp"
 #include "extractor/extractor_callbacks.hpp"
 #include "extractor/files.hpp"
+#include "extractor/link_map.hpp"
 #include "extractor/maneuver_override_relation_parser.hpp"
 #include "extractor/node_based_graph_factory.hpp"
 #include "extractor/node_restriction_map.hpp"
@@ -239,7 +240,6 @@ int Extractor::run(ScriptingEnvironment &scripting_environment)
     auto const &coordinates = node_based_graph_factory.GetCoordinates();
     files::writeNodes(
         config.GetPath(".osrm.nbg_nodes"), coordinates, node_based_graph_factory.GetOsmNodes());
-    node_based_graph_factory.ReleaseOsmNodes();
 
     auto const &node_based_graph = node_based_graph_factory.GetGraph();
 
@@ -298,8 +298,16 @@ int Extractor::run(ScriptingEnvironment &scripting_environment)
 
     // output the geometry of the node-based graph, needs to be done after the last usage, since it
     // destroys internal containers
-    files::writeSegmentData(config.GetPath(".osrm.geometry"),
-                            *node_based_graph_factory.GetCompressedEdges().ToSegmentData());
+    auto segment_data = node_based_graph_factory.GetCompressedEdges().ToSegmentData();
+    if (config.emit_link_map)
+    {
+        files::writeLinkMap(config.GetPath(".osrm.link_map"),
+                            BuildLinkMap(parsed_osm_data.way_node_storage,
+                                         *segment_data,
+                                         node_based_graph_factory.GetOsmNodes()));
+    }
+    files::writeSegmentData(config.GetPath(".osrm.geometry"), *segment_data);
+    node_based_graph_factory.ReleaseOsmNodes();
 
     util::Log() << "Saving edge-based node weights to file.";
     TIMER_START(timer_write_node_weights);
@@ -648,6 +656,7 @@ Extractor::ParsedOSMData Extractor::ParseOSMData(ScriptingEnvironment &scripting
                          std::move(extraction_containers.internal_maneuver_overrides),
                          std::move(osm_coordinates),
                          std::move(osm_node_ids),
+                         std::move(extraction_containers.raw_way_nodes),
                          std::move(extraction_containers.used_edges),
                          std::move(extraction_containers.all_edges_annotation_data_list)};
 }

@@ -122,10 +122,23 @@ endif()
 
 function(add_dependency_includes)
   if(${ARGC} GREATER 0)
-    list(APPEND DEPENDENCIES_INCLUDE_DIRS "${ARGV}")
+    foreach(include_dir ${ARGV})
+      if(include_dir AND NOT include_dir MATCHES "-NOTFOUND$")
+        list(APPEND DEPENDENCIES_INCLUDE_DIRS "${include_dir}")
+      endif()
+    endforeach()
     set(DEPENDENCIES_INCLUDE_DIRS "${DEPENDENCIES_INCLUDE_DIRS}" PARENT_SCOPE)
   endif()
 endfunction(add_dependency_includes)
+
+function(add_dependency_includes_from_target target_name)
+  if(TARGET ${target_name})
+    get_target_property(target_include_dirs ${target_name} INTERFACE_INCLUDE_DIRECTORIES)
+    if(target_include_dirs)
+      add_dependency_includes(${target_include_dirs})
+    endif()
+  endif()
+endfunction(add_dependency_includes_from_target)
 
 function(add_dependency_defines defines)
   list(APPEND OSRM_DEFINES "${defines}")
@@ -181,6 +194,7 @@ add_executable(osrm-extract src/tools/extract.cpp)
 add_executable(osrm-partition src/tools/partition.cpp)
 add_executable(osrm-customize src/tools/customize.cpp)
 add_executable(osrm-contract src/tools/contract.cpp)
+add_executable(osrm-temporal-path-eval src/tools/osrm-temporal-path-eval.cpp)
 add_executable(osrm-datastore src/tools/store.cpp $<TARGET_OBJECTS:MICROTAR> $<TARGET_OBJECTS:UTIL>)
 add_library(osrm src/osrm/osrm.cpp $<TARGET_OBJECTS:ENGINE> $<TARGET_OBJECTS:STORAGE> $<TARGET_OBJECTS:MICROTAR> $<TARGET_OBJECTS:UTIL>)
 add_library(osrm_contract src/osrm/contractor.cpp $<TARGET_OBJECTS:CONTRACTOR> $<TARGET_OBJECTS:UTIL>)
@@ -387,6 +401,8 @@ if (ENABLE_CONAN)
   set(BOOST_BASE_LIBRARIES ${Boost_LIBRARIES})
   set(BOOST_ENGINE_LIBRARIES ${Boost_LIBRARIES})
 
+  add_dependency_includes_from_target(TBB::tbb)
+  add_dependency_includes(${TBB_INCLUDE_DIRS})
   add_dependency_includes(${TBB_INCLUDE_DIR})
   set(TBB_LIBRARIES ${TBB_LIBRARIES})
 
@@ -415,6 +431,8 @@ else()
   find_package(Lua 5.2 REQUIRED)
 
   add_dependency_includes(${Boost_INCLUDE_DIRS})
+  add_dependency_includes_from_target(TBB::tbb)
+  add_dependency_includes(${TBB_INCLUDE_DIRS})
   add_dependency_includes(${TBB_INCLUDE_DIR})
   add_dependency_includes(${EXPAT_INCLUDE_DIRS})
   add_dependency_includes(${BZIP2_INCLUDE_DIR})
@@ -491,6 +509,7 @@ target_link_libraries(osrm-extract osrm_extract ${Boost_PROGRAM_OPTIONS_LIBRARY}
 target_link_libraries(osrm-partition osrm_partition ${Boost_PROGRAM_OPTIONS_LIBRARY})
 target_link_libraries(osrm-customize osrm_customize ${Boost_PROGRAM_OPTIONS_LIBRARY})
 target_link_libraries(osrm-contract osrm_contract ${Boost_PROGRAM_OPTIONS_LIBRARY})
+target_link_libraries(osrm-temporal-path-eval osrm ${Boost_PROGRAM_OPTIONS_LIBRARY})
 target_link_libraries(osrm-routed osrm ${Boost_PROGRAM_OPTIONS_LIBRARY} ${OPTIONAL_SOCKET_LIBS} ${ZLIB_LIBRARY})
 
 set(EXTRACTOR_LIBRARIES
@@ -611,6 +630,7 @@ install(TARGETS osrm-extract DESTINATION bin)
 install(TARGETS osrm-partition DESTINATION bin)
 install(TARGETS osrm-customize DESTINATION bin)
 install(TARGETS osrm-contract DESTINATION bin)
+install(TARGETS osrm-temporal-path-eval DESTINATION bin)
 install(TARGETS osrm-datastore DESTINATION bin)
 install(TARGETS osrm-routed DESTINATION bin)
 
@@ -680,14 +700,18 @@ endif()
 
 JOIN("${PKGCONFIG_DEPENDENT_LIBRARIES}" " " PKGCONFIG_OSRM_DEPENDENT_LIBRARIES)
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkgconfig.in pkgconfig.configured @ONLY)
-file(GENERATE
-     OUTPUT
-     ${PROJECT_BINARY_DIR}/libosrm.pc
-     INPUT
-     ${PROJECT_BINARY_DIR}/pkgconfig.configured)
+if(CMAKE_CONFIGURATION_TYPES)
+  message(STATUS "Skipping libosrm.pc generation for multi-config generator ${CMAKE_GENERATOR}")
+else()
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkgconfig.in pkgconfig.configured @ONLY)
+  file(GENERATE
+       OUTPUT
+       ${PROJECT_BINARY_DIR}/libosrm.pc
+       INPUT
+       ${PROJECT_BINARY_DIR}/pkgconfig.configured)
 
-install(FILES ${PROJECT_BINARY_DIR}/libosrm.pc DESTINATION ${PKGCONFIG_LIBRARY_DIR}/pkgconfig)
+  install(FILES ${PROJECT_BINARY_DIR}/libosrm.pc DESTINATION ${PKGCONFIG_LIBRARY_DIR}/pkgconfig)
+endif()
 
 # uninstall target
 configure_file(

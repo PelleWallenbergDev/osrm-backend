@@ -8,6 +8,7 @@
 
 #include "contractor/files.hpp"
 #include "customizer/files.hpp"
+#include "customizer/temporal_files.hpp"
 #include "extractor/files.hpp"
 #include "guidance/files.hpp"
 #include "partitioner/files.hpp"
@@ -325,6 +326,9 @@ std::vector<std::pair<bool, std::filesystem::path>> Storage::GetUpdatableFiles()
         {IS_OPTIONAL, config.GetPath(".osrm.mldgr")},
         {IS_OPTIONAL, config.GetPath(".osrm.cell_metrics")},
         {IS_OPTIONAL, config.GetPath(".osrm.hsgr")},
+        {IS_OPTIONAL, config.GetPath(".osrm.temporal_index")},
+        {IS_OPTIONAL, config.GetPath(".osrm.temporal_profiles")},
+        {IS_OPTIONAL, config.GetPath(".osrm.temporal_meta")},
         {IS_REQUIRED, config.GetPath(".osrm.datasource_names")},
         {IS_REQUIRED, config.GetPath(".osrm.geometry")},
         {IS_REQUIRED, config.GetPath(".osrm.turn_weight_penalties")},
@@ -501,10 +505,41 @@ void Storage::PopulateStaticData(const SharedDataIndex &index)
 
 void Storage::PopulateUpdatableData(const SharedDataIndex &index)
 {
+    const auto has_temporal_index = std::filesystem::exists(config.GetPath(".osrm.temporal_index"));
+    const auto has_temporal_profiles =
+        std::filesystem::exists(config.GetPath(".osrm.temporal_profiles"));
+    const auto has_temporal_meta = std::filesystem::exists(config.GetPath(".osrm.temporal_meta"));
+
+    if (has_temporal_index || has_temporal_profiles || has_temporal_meta)
+    {
+        if (!(has_temporal_index && has_temporal_profiles && has_temporal_meta))
+        {
+            throw util::exception(std::string("Temporal sidecar is incomplete. Expected "
+                                              ".osrm.temporal_index, .osrm.temporal_profiles "
+                                              "and .osrm.temporal_meta") +
+                                  SOURCE_REF);
+        }
+    }
+
     // load compressed geometry
     {
         auto segment_data = make_segment_data_view(index, "/common/segment_data");
         extractor::files::readSegmentData(config.GetPath(".osrm.geometry"), segment_data);
+    }
+
+    if (has_temporal_index && has_temporal_profiles && has_temporal_meta)
+    {
+        auto temporal_index =
+            make_temporal_profile_index_view(index, "/common/temporal_profile_index");
+        customizer::files::readTemporalProfileIndex(config.GetPath(".osrm.temporal_index"),
+                                                    temporal_index);
+
+        auto temporal_profiles =
+            make_temporal_profile_storage_view(index, "/common/temporal_profiles");
+        customizer::files::readTemporalProfiles(config.GetPath(".osrm.temporal_profiles"),
+                                                temporal_profiles);
+        customizer::files::readTemporalMeta(config.GetPath(".osrm.temporal_meta"),
+                                            temporal_profiles);
     }
 
     {

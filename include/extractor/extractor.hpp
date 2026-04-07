@@ -34,6 +34,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "extractor/graph_compressor.hpp"
 #include "extractor/maneuver_override.hpp"
 #include "extractor/packed_osm_ids.hpp"
+#include "extractor/way_node_storage.hpp"
 
 #include "guidance/guidance_processing.hpp"
 #include "guidance/turn_data_container.hpp"
@@ -65,6 +66,7 @@ class Extractor
         std::vector<UnresolvedManeuverOverride> unresolved_maneuver_overrides;
         std::vector<util::Coordinate> osm_coordinates;
         extractor::PackedOSMIDs osm_node_ids;
+        WayNodeStorage way_node_storage;
         std::vector<NodeBasedEdge> edge_list;
         std::vector<NodeBasedEdgeAnnotation> annotation_data;
     };

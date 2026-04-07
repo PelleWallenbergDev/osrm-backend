@@ -183,6 +183,26 @@ class ContiguousInternalMemoryDataFacade<routing_algorithms::offline::Algorithm>
         return DurationReverseRange(DurationForwardRange());
     }
 
+    bool HasTemporalForwardProfile(const PackedGeometryID /*id*/) const override { return false; }
+
+    bool HasTemporalReverseProfile(const PackedGeometryID /*id*/) const override { return false; }
+
+    std::uint32_t GetTemporalBucketSizeMinutes() const override { return 0; }
+
+    std::uint32_t GetTemporalWeekBucketCount() const override { return 0; }
+
+    EdgeDuration GetTemporalForwardDuration(const PackedGeometryID /*id*/,
+                                           const std::uint32_t /*week_bucket*/) const override
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+    EdgeDuration GetTemporalReverseDuration(const PackedGeometryID /*id*/,
+                                           const std::uint32_t /*week_bucket*/) const override
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
     DatasourceForwardRange GetUncompressedForwardDatasources(const EdgeID /*id*/) const override
     {
         return {};

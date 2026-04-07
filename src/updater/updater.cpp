@@ -1,5 +1,9 @@
 #include "updater/updater.hpp"
 #include "updater/csv_source.hpp"
+#include "updater/hit_fcd_source.hpp"
+#include "updater/temporal_source.hpp"
+
+#include "customizer/temporal_files.hpp"
 
 #include "extractor/compressed_edge_container.hpp"
 #include "extractor/edge_based_graph_factory.hpp"
@@ -37,7 +41,9 @@
 #include <atomic>
 #include <cstdint>
 #include <iterator>
+#include <map>
 #include <memory>
+#include <optional>
 #include <tuple>
 #include <vector>
 
@@ -117,6 +123,320 @@ void checkWeightsConsistency(
 #endif
 
 static const constexpr std::size_t LUA_SOURCE = 0;
+
+struct TemporalSegmentKey
+{
+    std::uint64_t from = 0;
+    std::uint64_t to = 0;
+    std::uint8_t direction = TEMPORAL_DIRECTION_FORWARD;
+
+    bool operator<(const TemporalSegmentKey &rhs) const
+    {
+        return std::tie(from, to, direction) < std::tie(rhs.from, rhs.to, rhs.direction);
+    }
+};
+
+using TemporalBucketEntry =
+    std::pair<std::uint32_t, customizer::TemporalProfileBucketValue>;
+using TemporalSegmentLookup = std::map<TemporalSegmentKey, std::vector<TemporalBucketEntry>>;
+
+customizer::TemporalProfileBucketValue clampTemporalDuration(const std::int64_t duration_ds)
+{
+    using BucketValue = customizer::TemporalProfileBucketValue;
+    constexpr auto max_duration = std::numeric_limits<BucketValue>::max() - 1;
+    return boost::numeric_cast<BucketValue>(std::clamp<std::int64_t>(duration_ds, 1, max_duration));
+}
+
+TemporalSegmentLookup buildTemporalSegmentLookup(const UpdaterConfig &config,
+                                                const TemporalLookupTable &temporal_lookup)
+{
+    TemporalSegmentLookup segment_lookup;
+
+    for (const auto &[key, value] : temporal_lookup.lookup)
+    {
+        if (key.week_bucket >= config.temporal_week_bucket_count)
+        {
+            throw util::exception("Temporal week bucket " + std::to_string(key.week_bucket) +
+                                  " is out of range for configured bucket count " +
+                                  std::to_string(config.temporal_week_bucket_count) +
+                                  SOURCE_REF);
+        }
+
+        if (value.duration_ds <= 0)
+        {
+            throw util::exception("Temporal duration must be positive for segment " +
+                                  std::to_string(key.from) + "," + std::to_string(key.to) +
+                                  SOURCE_REF);
+        }
+
+        segment_lookup[{key.from, key.to, key.direction}].push_back(
+            {key.week_bucket, value.duration_ds});
+    }
+
+    return segment_lookup;
+}
+
+const std::vector<TemporalBucketEntry> *
+findTemporalBuckets(const TemporalSegmentLookup &segment_lookup,
+                    const OSMNodeID from,
+                    const OSMNodeID to,
+                    const std::uint8_t direction)
+{
+    const auto lookup_exact = segment_lookup.find(
+        {static_cast<std::uint64_t>(from), static_cast<std::uint64_t>(to), direction});
+    if (lookup_exact != segment_lookup.end())
+    {
+        return &lookup_exact->second;
+    }
+
+    const auto fallback_direction = direction == TEMPORAL_DIRECTION_FORWARD
+                                        ? TEMPORAL_DIRECTION_REVERSE
+                                        : TEMPORAL_DIRECTION_FORWARD;
+    const auto lookup_fallback =
+        segment_lookup.find({static_cast<std::uint64_t>(to),
+                             static_cast<std::uint64_t>(from),
+                             fallback_direction});
+    if (lookup_fallback != segment_lookup.end())
+    {
+        return &lookup_fallback->second;
+    }
+
+    return nullptr;
+}
+
+std::optional<std::vector<customizer::TemporalProfileBucketValue>>
+buildTemporalGeometryProfile(const UpdaterConfig &config,
+                            const extractor::SegmentDataContainer &segment_data,
+                            const extractor::PackedOSMIDs &osm_node_ids,
+                            const PackedGeometryID geometry_id,
+                            const bool forward,
+                            const TemporalSegmentLookup &segment_lookup)
+{
+    constexpr std::size_t min_present_buckets = 1;
+    constexpr auto invalid_value =
+        std::numeric_limits<customizer::TemporalProfileBucketValue>::min();
+
+    const auto nodes_range = segment_data.GetForwardGeometry(geometry_id);
+    if (nodes_range.size() < 2)
+    {
+        return std::nullopt;
+    }
+
+    std::vector<SegmentDuration> static_segment_durations;
+    static_segment_durations.reserve(nodes_range.size() - 1);
+    if (forward)
+    {
+        const auto durations = segment_data.GetForwardDurations(geometry_id);
+        static_segment_durations.assign(durations.begin(), durations.end());
+    }
+    else
+    {
+        const auto durations = segment_data.GetReverseDurations(geometry_id) | std::views::reverse;
+        static_segment_durations.assign(durations.begin(), durations.end());
+    }
+
+    std::int64_t static_total_duration = 0;
+    std::vector<std::int64_t> bucket_deltas(config.temporal_week_bucket_count, 0);
+    std::vector<bool> bucket_present(config.temporal_week_bucket_count, false);
+
+    for (const auto segment_offset : util::irange<std::size_t>(0, static_segment_durations.size()))
+    {
+        const auto from = osm_node_ids[nodes_range[segment_offset]];
+        const auto to = osm_node_ids[nodes_range[segment_offset + 1]];
+        const auto static_duration_ds =
+            from_alias<SegmentDuration::value_type>(static_segment_durations[segment_offset]);
+        static_total_duration += static_duration_ds;
+
+        if (from == to)
+        {
+            continue;
+        }
+
+        const auto *temporal_buckets = findTemporalBuckets(
+            segment_lookup,
+            from,
+            to,
+            forward ? TEMPORAL_DIRECTION_FORWARD : TEMPORAL_DIRECTION_REVERSE);
+
+        if (!temporal_buckets)
+        {
+            continue;
+        }
+
+        for (const auto &[bucket, duration_ds] : *temporal_buckets)
+        {
+            bucket_deltas[bucket] += duration_ds - static_duration_ds;
+            bucket_present[bucket] = true;
+        }
+    }
+
+    if (std::count(bucket_present.begin(), bucket_present.end(), true) < min_present_buckets)
+    {
+        return std::nullopt;
+    }
+
+    std::vector<customizer::TemporalProfileBucketValue> profile(config.temporal_week_bucket_count,
+                                                                invalid_value);
+    for (const auto bucket : util::irange<std::size_t>(0, profile.size()))
+    {
+        if (bucket_present[bucket])
+        {
+            profile[bucket] =
+                clampTemporalDuration(static_total_duration + bucket_deltas[bucket]);
+        }
+    }
+
+    std::optional<customizer::TemporalProfileBucketValue> previous_value;
+    for (auto &value : profile)
+    {
+        if (value == invalid_value)
+        {
+            if (previous_value)
+            {
+                value = *previous_value;
+            }
+        }
+        else
+        {
+            previous_value = value;
+        }
+    }
+
+    std::optional<customizer::TemporalProfileBucketValue> next_value;
+    for (auto index = profile.size(); index > 0; --index)
+    {
+        auto &value = profile[index - 1];
+        if (value == invalid_value)
+        {
+            if (next_value)
+            {
+                value = *next_value;
+            }
+        }
+        else
+        {
+            next_value = value;
+        }
+    }
+
+    for (auto &value : profile)
+    {
+        if (value == invalid_value)
+        {
+            value = clampTemporalDuration(static_total_duration);
+        }
+    }
+
+    return profile;
+}
+
+customizer::TemporalProfileID
+registerTemporalProfile(const std::vector<customizer::TemporalProfileBucketValue> &profile,
+                        std::map<std::vector<customizer::TemporalProfileBucketValue>,
+                                 customizer::TemporalProfileID> &deduplicated_profiles,
+                        customizer::TemporalProfileStorage &storage)
+{
+    const auto [iterator, inserted] = deduplicated_profiles.try_emplace(
+        profile, static_cast<customizer::TemporalProfileID>(deduplicated_profiles.size()));
+
+    if (inserted)
+    {
+        storage.profile_offsets.push_back(storage.values.size());
+        storage.profile_sizes.push_back(profile.size());
+        storage.values.insert(storage.values.end(), profile.begin(), profile.end());
+        storage.freeflow_speeds.push_back(0);
+        storage.constrained_speeds.push_back(0);
+    }
+
+    return iterator->second;
+}
+
+void writeTemporalSidecar(const UpdaterConfig &config,
+                         const extractor::SegmentDataContainer &segment_data,
+                         const extractor::PackedOSMIDs &osm_node_ids,
+                         const std::optional<TemporalLookupTable> &temporal_lookup)
+{
+    if (config.temporal_bucket_size_minutes == 0 || config.temporal_week_bucket_count == 0)
+    {
+        throw util::exception(std::string("Temporal sidecar requires non-zero bucket size and "
+                                          "week bucket count") +
+                              SOURCE_REF);
+    }
+
+    TemporalSegmentLookup segment_lookup;
+    if (temporal_lookup)
+    {
+        segment_lookup = buildTemporalSegmentLookup(config, *temporal_lookup);
+    }
+
+    customizer::TemporalProfileIndex profile_index;
+    profile_index.forward_profile_ids.resize(segment_data.GetNumberOfGeometries(),
+                                             customizer::INVALID_TEMPORAL_PROFILE_ID);
+    profile_index.reverse_profile_ids.resize(segment_data.GetNumberOfGeometries(),
+                                             customizer::INVALID_TEMPORAL_PROFILE_ID);
+
+    customizer::TemporalProfileStorage profile_storage;
+    profile_storage.meta.bucket_size_minutes = config.temporal_bucket_size_minutes;
+    profile_storage.meta.week_bucket_count = config.temporal_week_bucket_count;
+    profile_storage.meta.encoding_version = customizer::TEMPORAL_PROFILE_ENCODING_VERSION_DENSE;
+
+    std::map<std::vector<customizer::TemporalProfileBucketValue>, customizer::TemporalProfileID>
+        deduplicated_profiles;
+
+    for (const auto geometry_id :
+         util::irange<PackedGeometryID>(0, segment_data.GetNumberOfGeometries()))
+    {
+        if (const auto forward_profile = buildTemporalGeometryProfile(
+                config, segment_data, osm_node_ids, geometry_id, true, segment_lookup))
+        {
+            profile_index.forward_profile_ids[geometry_id] =
+                registerTemporalProfile(*forward_profile, deduplicated_profiles, profile_storage);
+        }
+
+        if (const auto reverse_profile = buildTemporalGeometryProfile(
+                config, segment_data, osm_node_ids, geometry_id, false, segment_lookup))
+        {
+            profile_index.reverse_profile_ids[geometry_id] =
+                registerTemporalProfile(*reverse_profile, deduplicated_profiles, profile_storage);
+        }
+    }
+
+    customizer::files::writeTemporalProfileIndex(config.GetPath(".osrm.temporal_index"),
+                                                 profile_index);
+    customizer::files::writeTemporalProfiles(config.GetPath(".osrm.temporal_profiles"),
+                                             profile_storage);
+    customizer::files::writeTemporalMeta(config.GetPath(".osrm.temporal_meta"),
+                                         profile_storage.meta);
+
+    util::Log() << "Wrote " << profile_storage.profile_offsets.size()
+                << " unique temporal profile(s)";
+}
+
+void validateHitFCDBucketConfig(const UpdaterConfig &config)
+{
+    static constexpr std::uint32_t MINUTES_PER_WEEK = 7 * 24 * 60;
+
+    if (config.temporal_bucket_size_minutes == 0)
+    {
+        throw util::exception("HIT FCD import requires a non-zero temporal bucket size" +
+                              SOURCE_REF);
+    }
+
+    if (MINUTES_PER_WEEK % config.temporal_bucket_size_minutes != 0)
+    {
+        throw util::exception("HIT FCD import requires a temporal bucket size that evenly "
+                              "divides a week" +
+                              SOURCE_REF);
+    }
+
+    const auto expected_bucket_count = MINUTES_PER_WEEK / config.temporal_bucket_size_minutes;
+    if (config.temporal_week_bucket_count != expected_bucket_count)
+    {
+        throw util::exception("HIT FCD import requires temporal_week_bucket_count=" +
+                              std::to_string(expected_bucket_count) + " for bucket size " +
+                              std::to_string(config.temporal_bucket_size_minutes) + SOURCE_REF);
+    }
+}
 
 tbb::concurrent_vector<GeometryID>
 updateSegmentData(const UpdaterConfig &config,
@@ -563,24 +883,35 @@ Updater::LoadAndUpdateEdgeExpandedGraph(std::vector<extractor::EdgeBasedEdge> &e
     const bool update_conditional_turns =
         !config.GetPath(".osrm.restrictions").empty() && config.valid_now;
     const bool update_edge_weights = !config.segment_speed_lookup_paths.empty();
+    const bool update_temporal_sidecar =
+        config.write_temporal_sidecar || !config.segment_temporal_lookup_paths.empty() ||
+        !config.hit_fcd_lookup_paths.empty();
     const bool update_turn_penalties = !config.turn_penalty_lookup_paths.empty();
 
-    if (!update_edge_weights && !update_turn_penalties && !update_conditional_turns)
+    if (!update_edge_weights && !update_turn_penalties && !update_conditional_turns &&
+        !update_temporal_sidecar)
     {
         saveDatasourcesNames(config);
         return number_of_edge_based_nodes;
     }
 
-    if (config.segment_speed_lookup_paths.size() + config.turn_penalty_lookup_paths.size() > 255)
-        throw util::exception("Limit of 255 segment speed and turn penalty files each reached" +
+    if (config.segment_speed_lookup_paths.size() > 255 ||
+        config.hit_fcd_lookup_paths.size() > 255 ||
+        config.segment_temporal_lookup_paths.size() > 255 ||
+        config.turn_penalty_lookup_paths.size() > 255)
+    {
+        throw util::exception(std::string("Limit of 255 segment speed, temporal segment, and "
+                                          "turn penalty files each reached") +
                               SOURCE_REF);
+    }
 
     extractor::EdgeBasedNodeDataContainer node_data;
     extractor::SegmentDataContainer segment_data;
     extractor::ProfileProperties profile_properties;
     std::vector<TurnPenalty> turn_weight_penalties;
     std::vector<TurnPenalty> turn_duration_penalties;
-    if (update_edge_weights || update_turn_penalties || update_conditional_turns)
+    if (update_edge_weights || update_turn_penalties || update_conditional_turns ||
+        update_temporal_sidecar)
     {
         tbb::parallel_invoke(
             [&]
@@ -611,6 +942,33 @@ Updater::LoadAndUpdateEdgeExpandedGraph(std::vector<extractor::EdgeBasedEdge> &e
                                                       conditional_turns);
     }
 
+    std::optional<TemporalLookupTable> temporal_lookup;
+    if (!config.segment_temporal_lookup_paths.empty() && !config.hit_fcd_lookup_paths.empty())
+    {
+        throw util::exception("Use either --segment-temporal-file or --hit-fcd-file, not both" +
+                              SOURCE_REF);
+    }
+
+    if (!config.segment_temporal_lookup_paths.empty())
+    {
+        temporal_lookup = readTemporalValues(config.segment_temporal_lookup_paths);
+    }
+    else if (!config.hit_fcd_lookup_paths.empty())
+    {
+        validateHitFCDBucketConfig(config);
+
+        extractor::LinkMapStorage link_map;
+        extractor::files::readLinkMap(config.GetPath(".osrm.link_map"), link_map);
+
+        const auto hit_fcd_lookup =
+            readHitFCDValues(config.hit_fcd_lookup_paths,
+                             config.temporal_bucket_size_minutes,
+                             config.hit_fcd_forward_direction,
+                             config.hit_fcd_reverse_direction);
+        temporal_lookup =
+            buildTemporalLookupFromHitFCD(hit_fcd_lookup, link_map, segment_data, coordinates, osm_node_ids);
+    }
+
     tbb::concurrent_vector<GeometryID> updated_segments;
     if (update_edge_weights)
     {
@@ -627,6 +985,14 @@ Updater::LoadAndUpdateEdgeExpandedGraph(std::vector<extractor::EdgeBasedEdge> &e
         extractor::files::writeSegmentData(config.GetPath(".osrm.geometry"), segment_data);
         TIMER_STOP(segment);
         util::Log() << "Updating segment data took " << TIMER_MSEC(segment) << "ms.";
+    }
+
+    if (update_temporal_sidecar)
+    {
+        TIMER_START(temporal_sidecar);
+        writeTemporalSidecar(config, segment_data, osm_node_ids, temporal_lookup);
+        TIMER_STOP(temporal_sidecar);
+        util::Log() << "Writing temporal sidecar took " << TIMER_MSEC(temporal_sidecar) << "ms.";
     }
 
     auto turn_penalty_lookup = csv::readTurnValues(config.turn_penalty_lookup_paths);

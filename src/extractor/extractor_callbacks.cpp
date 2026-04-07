@@ -469,13 +469,13 @@ void ExtractorCallbacks::ProcessWay(const osmium::Way &input_way, const Extracti
 
     std::transform(nodes.begin(),
                    nodes.end(),
-                   std::back_inserter(external_memory.used_node_id_list),
+                   std::back_inserter(external_memory.raw_way_nodes.node_ids),
                    [](const osmium::NodeRef &ref)
                    { return OSMNodeID{static_cast<std::uint64_t>(ref.ref())}; });
 
     auto way_id = OSMWayID{static_cast<std::uint64_t>(input_way.id())};
-    external_memory.ways_list.push_back(way_id);
-    external_memory.way_node_id_offsets.push_back(external_memory.used_node_id_list.size());
+    external_memory.raw_way_nodes.way_ids.push_back(way_id);
+    external_memory.raw_way_nodes.node_offsets.push_back(external_memory.raw_way_nodes.node_ids.size());
 }
 
 } // namespace osrm::extractor

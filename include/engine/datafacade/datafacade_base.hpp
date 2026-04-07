@@ -98,6 +98,15 @@ class BaseDataFacade
     virtual DurationReverseRange
     GetUncompressedReverseDurations(const PackedGeometryID id) const = 0;
 
+    virtual bool HasTemporalForwardProfile(const PackedGeometryID id) const = 0;
+    virtual bool HasTemporalReverseProfile(const PackedGeometryID id) const = 0;
+    virtual std::uint32_t GetTemporalBucketSizeMinutes() const = 0;
+    virtual std::uint32_t GetTemporalWeekBucketCount() const = 0;
+    virtual EdgeDuration GetTemporalForwardDuration(const PackedGeometryID id,
+                                                    const std::uint32_t week_bucket) const = 0;
+    virtual EdgeDuration GetTemporalReverseDuration(const PackedGeometryID id,
+                                                    const std::uint32_t week_bucket) const = 0;
+
     // Returns the data source ids that were used to supply the edge
     // weights.  Will return an empty array when only the base profile is used.
     virtual DatasourceForwardRange

@@ -2,6 +2,7 @@
 #define OSRM_EXTRACTOR_FILES_HPP
 
 #include "extractor/edge_based_edge.hpp"
+#include "extractor/link_map.hpp"
 #include "extractor/node_data_container.hpp"
 #include "extractor/profile_properties.hpp"
 #include "extractor/query_node.hpp"
@@ -181,6 +182,41 @@ inline void writeDatasources(const std::filesystem::path &path, Datasources &sou
     storage::tar::FileWriter writer{path, fingerprint};
 
     serialization::write(writer, "/common/data_sources_names", sources);
+}
+
+inline void readLinkMap(const std::filesystem::path &path, LinkMapStorage &link_map)
+{
+    const auto fingerprint = storage::tar::FileReader::VerifyFingerprint;
+    storage::tar::FileReader reader{path, fingerprint};
+
+    storage::serialization::read(reader, "/extractor/link_map/keys/way_ids", link_map.way_ids);
+    storage::serialization::read(reader, "/extractor/link_map/key_offsets", link_map.offsets);
+    storage::serialization::read(
+        reader, "/extractor/link_map/entries/geometry_ids", link_map.geometry_ids);
+    storage::serialization::read(
+        reader, "/extractor/link_map/entries/geometry_directions", link_map.geometry_directions);
+    storage::serialization::read(
+        reader, "/extractor/link_map/entries/segment_begins", link_map.segment_begins);
+    storage::serialization::read(
+        reader, "/extractor/link_map/entries/segment_ends", link_map.segment_ends);
+}
+
+inline void writeLinkMap(const std::filesystem::path &path, const LinkMapStorage &link_map)
+{
+    const auto fingerprint = storage::tar::FileWriter::GenerateFingerprint;
+    storage::tar::FileWriter writer{path, fingerprint};
+
+    storage::serialization::write(writer, "/extractor/link_map/keys/way_ids", link_map.way_ids);
+    storage::serialization::write(writer, "/extractor/link_map/key_offsets", link_map.offsets);
+    storage::serialization::write(
+        writer, "/extractor/link_map/entries/geometry_ids", link_map.geometry_ids);
+    storage::serialization::write(writer,
+                                  "/extractor/link_map/entries/geometry_directions",
+                                  link_map.geometry_directions);
+    storage::serialization::write(
+        writer, "/extractor/link_map/entries/segment_begins", link_map.segment_begins);
+    storage::serialization::write(
+        writer, "/extractor/link_map/entries/segment_ends", link_map.segment_ends);
 }
 
 // reads .osrm.geometry

@@ -13,6 +13,10 @@
 #include <cstdint>
 #include <optional>
 
+#ifdef GetClassName
+#undef GetClassName
+#endif
+
 namespace osrm::extractor
 {
 

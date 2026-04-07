@@ -7,6 +7,7 @@
 #include "contractor/query_graph.hpp"
 
 #include "customizer/edge_based_graph.hpp"
+#include "customizer/temporal_profiles.hpp"
 
 #include "extractor/class_data.hpp"
 #include "extractor/compressed_edge_container.hpp"
@@ -159,6 +160,42 @@ inline auto make_segment_data_view(const SharedDataIndex &index, const std::stri
                                       rev_duration_list,
                                       fwd_datasources_list,
                                       rev_datasources_list};
+}
+
+inline auto make_temporal_profile_index_view(const SharedDataIndex &index, const std::string &name)
+{
+    auto forward_profile_ids =
+        make_vector_view<customizer::TemporalProfileID>(index, name + "/forward_profile_ids");
+    auto reverse_profile_ids =
+        make_vector_view<customizer::TemporalProfileID>(index, name + "/reverse_profile_ids");
+
+    return customizer::TemporalProfileIndexView{forward_profile_ids, reverse_profile_ids};
+}
+
+inline auto make_temporal_profile_storage_view(const SharedDataIndex &index,
+                                               const std::string &name)
+{
+    auto profile_offsets = make_vector_view<std::uint64_t>(index, name + "/profile_offsets");
+    auto profile_sizes = make_vector_view<std::uint32_t>(index, name + "/profile_sizes");
+    auto bucket_size_minutes =
+        index.GetBlockPtr<std::uint32_t>(name + "/bucket_size_minutes");
+    auto week_bucket_count = index.GetBlockPtr<std::uint32_t>(name + "/week_bucket_count");
+    auto encoding_version = index.GetBlockPtr<std::uint32_t>(name + "/encoding_version");
+    auto freeflow_speeds =
+        make_vector_view<customizer::TemporalProfileSpeedValue>(index, name + "/freeflow_speeds");
+    auto constrained_speeds = make_vector_view<customizer::TemporalProfileSpeedValue>(
+        index, name + "/constrained_speeds");
+    auto values =
+        make_vector_view<customizer::TemporalProfileBucketValue>(index, name + "/values");
+
+    return customizer::TemporalProfileStorageView{profile_offsets,
+                                                  profile_sizes,
+                                                  bucket_size_minutes,
+                                                  week_bucket_count,
+                                                  encoding_version,
+                                                  freeflow_speeds,
+                                                  constrained_speeds,
+                                                  values};
 }
 
 inline auto make_coordinates_view(const SharedDataIndex &index, const std::string &name)

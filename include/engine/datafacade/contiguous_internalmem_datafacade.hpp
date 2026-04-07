@@ -27,6 +27,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef GetClassName
+#undef GetClassName
+#endif
+
 namespace osrm::engine::datafacade
 {
 
@@ -166,6 +170,8 @@ class ContiguousInternalMemoryDataFacadeBase : public BaseDataFacade
     util::vector_view<TurnPenalty> m_turn_weight_penalties;
     util::vector_view<TurnPenalty> m_turn_duration_penalties;
     extractor::SegmentDataView segment_data;
+    std::optional<customizer::TemporalProfileIndexView> temporal_profile_index;
+    std::optional<customizer::TemporalProfileStorageView> temporal_profile_storage;
     extractor::EdgeBasedNodeDataView edge_based_node_data;
     std::optional<osrm::guidance::TurnDataView> turn_data;
 
@@ -254,6 +260,15 @@ class ContiguousInternalMemoryDataFacadeBase : public BaseDataFacade
 
         segment_data = make_segment_data_view(index, "/common/segment_data");
 
+        if (isIndexed(index, "/common/temporal_profile_index") &&
+            isIndexed(index, "/common/temporal_profiles"))
+        {
+            temporal_profile_index =
+                make_temporal_profile_index_view(index, "/common/temporal_profile_index");
+            temporal_profile_storage =
+                make_temporal_profile_storage_view(index, "/common/temporal_profiles");
+        }
+
         m_datasources = index.GetBlockPtr<extractor::Datasources>("/common/data_sources_names");
 
         if (isIndexed(index, "/common/intersection_bearings"))
@@ -309,6 +324,52 @@ class ContiguousInternalMemoryDataFacadeBase : public BaseDataFacade
     GetUncompressedReverseDurations(const PackedGeometryID id) const override final
     {
         return segment_data.GetReverseDurations(id);
+    }
+
+    bool HasTemporalForwardProfile(const PackedGeometryID id) const override final
+    {
+        return temporal_profile_index && temporal_profile_storage &&
+               temporal_profile_index->HasForwardProfile(id);
+    }
+
+    bool HasTemporalReverseProfile(const PackedGeometryID id) const override final
+    {
+        return temporal_profile_index && temporal_profile_storage &&
+               temporal_profile_index->HasReverseProfile(id);
+    }
+
+    std::uint32_t GetTemporalBucketSizeMinutes() const override final
+    {
+        return temporal_profile_storage ? temporal_profile_storage->GetBucketSizeMinutes() : 0;
+    }
+
+    std::uint32_t GetTemporalWeekBucketCount() const override final
+    {
+        return temporal_profile_storage ? temporal_profile_storage->GetWeekBucketCount() : 0;
+    }
+
+    EdgeDuration GetTemporalForwardDuration(const PackedGeometryID id,
+                                            const std::uint32_t week_bucket) const override final
+    {
+        if (!HasTemporalForwardProfile(id))
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        return temporal_profile_storage->GetDuration(
+            temporal_profile_index->GetForwardProfileID(id), week_bucket);
+    }
+
+    EdgeDuration GetTemporalReverseDuration(const PackedGeometryID id,
+                                            const std::uint32_t week_bucket) const override final
+    {
+        if (!HasTemporalReverseProfile(id))
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        return temporal_profile_storage->GetDuration(
+            temporal_profile_index->GetReverseProfileID(id), week_bucket);
     }
 
     WeightForwardRange GetUncompressedForwardWeights(const PackedGeometryID id) const override final
@@ -444,7 +505,7 @@ class ContiguousInternalMemoryDataFacadeBase : public BaseDataFacade
                        indexes.end(),
                        classes.begin(),
                        [this](const auto index)
-                       { return m_profile_properties->GetClassName(index); });
+                       { return (m_profile_properties->GetClassName)(index); });
 
         return classes;
     }
