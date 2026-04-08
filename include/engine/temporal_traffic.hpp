@@ -4,6 +4,7 @@
 #include "engine/internal_route_result.hpp"
 #include "engine/phantom_node.hpp"
 
+#include "util/integer_range.hpp"
 #include "util/typedefs.hpp"
 
 #include <algorithm>
@@ -50,6 +51,13 @@ struct TemporalLegEvaluation
     std::vector<PathData> path_data;
     PhantomNode source_phantom;
     PhantomNode target_phantom;
+    std::time_t arrival_timestamp = 0;
+    bool used_temporal = false;
+};
+
+struct TemporalRouteEvaluation
+{
+    EdgeDuration total_duration = EdgeDuration{0};
     std::time_t arrival_timestamp = 0;
     bool used_temporal = false;
 };
@@ -167,6 +175,30 @@ inline void SetTraversalDuration(PhantomNode &phantom,
     {
         phantom.forward_duration = duration;
     }
+}
+
+inline EdgeDuration GetRouteLegDuration(const std::vector<PathData> &route_data,
+                                        const PhantomNode &source_phantom,
+                                        const PhantomNode &target_phantom,
+                                        const bool target_traversed_in_reverse)
+{
+    auto duration = std::accumulate(route_data.begin(),
+                                    route_data.end(),
+                                    EdgeDuration{0},
+                                    [](const EdgeDuration sum, const PathData &data)
+                                    { return sum + data.duration_until_turn; });
+
+    duration += detail::GetTraversalDuration(target_phantom, target_traversed_in_reverse);
+
+    if (route_data.empty())
+    {
+        duration = std::max(duration -
+                                detail::GetTraversalDuration(source_phantom,
+                                                             target_traversed_in_reverse),
+                            EdgeDuration{0});
+    }
+
+    return duration;
 }
 } // namespace detail
 
@@ -408,6 +440,100 @@ TemporalPathEvaluation EvaluateGeometryPath(const FacadeT &facade,
     }
 
     return evaluation;
+}
+
+template <typename FacadeT>
+TemporalRouteEvaluation EvaluateRoute(const FacadeT &facade,
+                                      const InternalRouteResult &route,
+                                      const std::time_t departure_timestamp)
+{
+    TemporalRouteEvaluation evaluation;
+    evaluation.arrival_timestamp = departure_timestamp;
+
+    for (auto leg_index : util::irange<std::size_t>(0UL, route.leg_endpoints.size()))
+    {
+        const auto leg_evaluation = EvaluateRouteLeg(facade,
+                                                     route.unpacked_path_segments[leg_index],
+                                                     route.leg_endpoints[leg_index].source_phantom,
+                                                     route.leg_endpoints[leg_index].target_phantom,
+                                                     route.source_traversed_in_reverse[leg_index],
+                                                     route.target_traversed_in_reverse[leg_index],
+                                                     evaluation.arrival_timestamp);
+
+        evaluation.total_duration += detail::GetRouteLegDuration(leg_evaluation.path_data,
+                                                                 leg_evaluation.source_phantom,
+                                                                 leg_evaluation.target_phantom,
+                                                                 route.target_traversed_in_reverse
+                                                                     [leg_index]);
+        evaluation.arrival_timestamp = leg_evaluation.arrival_timestamp;
+        evaluation.used_temporal = evaluation.used_temporal || leg_evaluation.used_temporal;
+    }
+
+    return evaluation;
+}
+
+template <typename FacadeT>
+bool RerankRoutesByTemporalDuration(const FacadeT &facade,
+                                    InternalManyRoutesResult &routes,
+                                    const std::time_t departure_timestamp)
+{
+    struct TemporalCandidateScore
+    {
+        std::size_t index = 0;
+        EdgeDuration duration = INVALID_EDGE_DURATION;
+        bool valid = false;
+        bool used_temporal = false;
+    };
+
+    std::vector<TemporalCandidateScore> scores;
+    scores.reserve(routes.routes.size());
+
+    for (auto index : util::irange<std::size_t>(0UL, routes.routes.size()))
+    {
+        const auto &route = routes.routes[index];
+        if (!route.is_valid())
+        {
+            scores.push_back({index, INVALID_EDGE_DURATION, false, false});
+            continue;
+        }
+
+        const auto evaluation = EvaluateRoute(facade, route, departure_timestamp);
+        scores.push_back({index, evaluation.total_duration, true, evaluation.used_temporal});
+    }
+
+    const auto any_temporal = std::any_of(
+        scores.begin(), scores.end(), [](const auto &score) { return score.used_temporal; });
+    if (!any_temporal)
+    {
+        return false;
+    }
+
+    std::stable_sort(scores.begin(),
+                     scores.end(),
+                     [](const TemporalCandidateScore &lhs, const TemporalCandidateScore &rhs)
+                     {
+                         if (lhs.valid != rhs.valid)
+                         {
+                             return lhs.valid > rhs.valid;
+                         }
+
+                         if (!lhs.valid)
+                         {
+                             return false;
+                         }
+
+                         return lhs.duration < rhs.duration;
+                     });
+
+    std::vector<InternalRouteResult> reordered_routes;
+    reordered_routes.reserve(routes.routes.size());
+    for (const auto &score : scores)
+    {
+        reordered_routes.push_back(std::move(routes.routes[score.index]));
+    }
+
+    routes.routes = std::move(reordered_routes);
+    return true;
 }
 
 } // namespace osrm::engine::temporal

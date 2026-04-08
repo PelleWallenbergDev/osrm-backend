@@ -95,6 +95,7 @@ BOOST_AUTO_TEST_CASE(invalid_route_urls)
     BOOST_CHECK_EQUAL(testInvalidOptions<RouteParameters>("1,2;3,4?annotations=true,false"), 24UL);
     BOOST_CHECK_EQUAL(
         testInvalidOptions<RouteParameters>("1,2;3,4?annotations=&overview=simplified"), 20UL);
+    BOOST_CHECK_EQUAL(testInvalidOptions<RouteParameters>("1,2;3,4?depart_at=foo"), 18UL);
 }
 
 BOOST_AUTO_TEST_CASE(invalid_table_urls)
@@ -542,6 +543,15 @@ BOOST_AUTO_TEST_CASE(valid_route_urls)
     CHECK_EQUAL_RANGE(reference_21.coordinates, result_21->coordinates);
     CHECK_EQUAL_RANGE_OF_HINTS(reference_21.hints, result_21->hints);
     CHECK_EQUAL_RANGE(reference_21.exclude, result_21->exclude);
+
+    RouteParameters reference_22{};
+    reference_22.coordinates = coords_1;
+    reference_22.departure_timestamp = std::time_t{1735689600};
+    auto result_22 = parseParameters<RouteParameters>("1,2;3,4?depart_at=1735689600");
+    BOOST_CHECK(result_22);
+    BOOST_REQUIRE(result_22->departure_timestamp.has_value());
+    BOOST_CHECK_EQUAL(*reference_22.departure_timestamp, *result_22->departure_timestamp);
+    CHECK_EQUAL_RANGE(reference_22.coordinates, result_22->coordinates);
 }
 
 BOOST_AUTO_TEST_CASE(valid_table_urls)

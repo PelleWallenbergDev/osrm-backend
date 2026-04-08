@@ -2,6 +2,7 @@
 #include "engine/api/route_api.hpp"
 #include "engine/routing_algorithms.hpp"
 #include "engine/status.hpp"
+#include "engine/temporal_traffic.hpp"
 
 #include "util/for_each_pair.hpp"
 #include "util/integer_range.hpp"
@@ -14,7 +15,6 @@
 
 namespace osrm::engine::plugins
 {
-
 ViaRoutePlugin::ViaRoutePlugin(int max_locations_viaroute,
                                int max_alternatives,
                                std::optional<double> default_radius)
@@ -104,10 +104,29 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
     const auto number_of_alternatives = std::max(1u, route_parameters.number_of_alternatives);
 
     InternalManyRoutesResult routes;
+    const auto use_temporal_candidate_reranking =
+        route_parameters.departure_timestamp && 2 == snapped_phantoms.size() &&
+        algorithms.HasAlternativePathSearch() && max_alternatives > 0;
+
     // Alternatives do not support vias, only direct s,t queries supported
     // See the implementation notes and high-level outline.
     // https://github.com/Project-OSRM/osrm-backend/issues/3905
-    if (2 == snapped_phantoms.size() && algorithms.HasAlternativePathSearch() && wants_alternatives)
+    if (use_temporal_candidate_reranking)
+    {
+        const auto temporal_candidate_count = wants_alternatives ? number_of_alternatives : 1u;
+        routes = algorithms.AlternativePathSearch({snapped_phantoms[0], snapped_phantoms[1]},
+                                                  temporal_candidate_count);
+        temporal::RerankRoutesByTemporalDuration(facade,
+                                                 routes,
+                                                 *route_parameters.departure_timestamp);
+
+        if (!wants_alternatives && routes.routes.size() > 1)
+        {
+            routes.routes.resize(1);
+        }
+    }
+    else if (2 == snapped_phantoms.size() && algorithms.HasAlternativePathSearch() &&
+             wants_alternatives)
     {
         routes = algorithms.AlternativePathSearch({snapped_phantoms[0], snapped_phantoms[1]},
                                                   number_of_alternatives);
