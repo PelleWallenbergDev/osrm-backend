@@ -30,6 +30,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "engine/api/base_parameters.hpp"
 
+#include <ctime>
 #include <vector>
 
 namespace osrm::engine::api
@@ -175,6 +176,7 @@ struct RouteParameters : public BaseParameters
     OverviewType overview = OverviewType::Simplified;
     std::optional<bool> continue_straight;
     std::vector<std::size_t> waypoints;
+    std::optional<std::time_t> departure_timestamp;
 
     bool IsValid() const
     {

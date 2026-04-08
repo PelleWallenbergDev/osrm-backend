@@ -73,4 +73,11 @@ BOOST_AUTO_TEST_CASE(evaluate_geometry_path_falls_back_to_static_duration)
     BOOST_CHECK_EQUAL(evaluation.arrival_timestamp, std::time_t{345610});
 }
 
+BOOST_AUTO_TEST_CASE(timestamp_to_week_bucket_advances_on_bucket_boundary)
+{
+    BOOST_CHECK_EQUAL(osrm::engine::temporal::TimestampToWeekBucket(std::time_t{345600}, 15), 0U);
+    BOOST_CHECK_EQUAL(osrm::engine::temporal::TimestampToWeekBucket(std::time_t{346499}, 15), 0U);
+    BOOST_CHECK_EQUAL(osrm::engine::temporal::TimestampToWeekBucket(std::time_t{346500}, 15), 1U);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

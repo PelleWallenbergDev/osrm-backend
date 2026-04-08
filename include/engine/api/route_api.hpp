@@ -20,6 +20,7 @@
 #include "engine/guidance/verbosity_reduction.hpp"
 
 #include "engine/internal_route_result.hpp"
+#include "engine/temporal_traffic.hpp"
 
 #include "guidance/turn_instruction.hpp"
 
@@ -931,6 +932,7 @@ class RouteAPI : public BaseAPI
         auto number_of_legs = leg_endpoints.size();
         legs.reserve(number_of_legs);
         leg_geometries.reserve(number_of_legs);
+        auto current_departure_timestamp = parameters.departure_timestamp;
 
         for (auto idx : util::irange<std::size_t>(0UL, number_of_legs))
         {
@@ -940,10 +942,29 @@ class RouteAPI : public BaseAPI
             const bool reversed_source = source_traversed_in_reverse[idx];
             const bool reversed_target = target_traversed_in_reverse[idx];
 
+            auto temporal_path_data = path_data;
+            auto source_phantom = phantoms.source_phantom;
+            auto target_phantom = phantoms.target_phantom;
+
+            if (current_departure_timestamp)
+            {
+                auto temporal_leg = temporal::EvaluateRouteLeg(BaseAPI::facade,
+                                                               path_data,
+                                                               phantoms.source_phantom,
+                                                               phantoms.target_phantom,
+                                                               reversed_source,
+                                                               reversed_target,
+                                                               *current_departure_timestamp);
+                temporal_path_data = std::move(temporal_leg.path_data);
+                source_phantom = std::move(temporal_leg.source_phantom);
+                target_phantom = std::move(temporal_leg.target_phantom);
+                current_departure_timestamp = temporal_leg.arrival_timestamp;
+            }
+
             auto leg = guidance::assembleLeg(facade,
-                                             path_data,
-                                             phantoms.source_phantom,
-                                             phantoms.target_phantom,
+                                             temporal_path_data,
+                                             source_phantom,
+                                             target_phantom,
                                              reversed_target);
 
             guidance::LegGeometry leg_geometry;
@@ -957,9 +978,9 @@ class RouteAPI : public BaseAPI
             {
 
                 leg_geometry = guidance::assembleGeometry(BaseAPI::facade,
-                                                          path_data,
-                                                          phantoms.source_phantom,
-                                                          phantoms.target_phantom,
+                                                          temporal_path_data,
+                                                          source_phantom,
+                                                          target_phantom,
                                                           reversed_source,
                                                           reversed_target);
 
@@ -967,13 +988,13 @@ class RouteAPI : public BaseAPI
                 if (parameters.steps)
                 {
                     leg.summary = guidance::assembleSummary(
-                        facade, path_data, phantoms.target_phantom, reversed_target);
+                        facade, temporal_path_data, target_phantom, reversed_target);
 
                     auto steps = guidance::assembleSteps(BaseAPI::facade,
-                                                         path_data,
+                                                         temporal_path_data,
                                                          leg_geometry,
-                                                         phantoms.source_phantom,
-                                                         phantoms.target_phantom,
+                                                         source_phantom,
+                                                         target_phantom,
                                                          reversed_source,
                                                          reversed_target);
 
@@ -1025,8 +1046,8 @@ class RouteAPI : public BaseAPI
                     leg.steps = guidance::suppressShortNameSegments(std::move(leg.steps));
                     leg.steps = guidance::assignRelativeLocations(std::move(leg.steps),
                                                                   leg_geometry,
-                                                                  phantoms.source_phantom,
-                                                                  phantoms.target_phantom);
+                                                                  source_phantom,
+                                                                  target_phantom);
                     leg_geometry = guidance::resyncGeometry(std::move(leg_geometry), leg.steps);
                 }
             }

@@ -29,14 +29,17 @@ struct RouteParametersGrammar : public BaseParametersGrammar<Iterator, Signature
              (qi::uint_[ph::bind(&engine::api::RouteParameters::number_of_alternatives, qi::_r1) =
                             qi::_1,
                         ph::bind(&engine::api::RouteParameters::alternatives, qi::_r1) =
-                            qi::_1 > 0] |
+                         qi::_1 > 0] |
               qi::bool_[ph::bind(&engine::api::RouteParameters::number_of_alternatives, qi::_r1) =
                             qi::_1,
                         ph::bind(&engine::api::RouteParameters::alternatives, qi::_r1) = qi::_1])) |
             (qi::lit("continue_straight=") >
              (qi::lit("default") |
               qi::bool_[ph::bind(&engine::api::RouteParameters::continue_straight, qi::_r1) =
-                            qi::_1]));
+                            qi::_1])) |
+            (qi::lit("depart_at=") >
+             qi::ulong_long[ph::bind(&engine::api::RouteParameters::departure_timestamp, qi::_r1) =
+                                qi::_1]);
 
         root_rule = query_rule(qi::_r1) > BaseGrammar::format_rule(qi::_r1) >
                     -('?' > (route_rule(qi::_r1) | base_rule(qi::_r1)) % '&');
