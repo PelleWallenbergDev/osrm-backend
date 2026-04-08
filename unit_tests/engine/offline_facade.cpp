@@ -203,6 +203,16 @@ class ContiguousInternalMemoryDataFacade<routing_algorithms::offline::Algorithm>
         return INVALID_EDGE_DURATION;
     }
 
+    EdgeDuration GetTemporalForwardMinDuration(const PackedGeometryID /*id*/) const override
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+    EdgeDuration GetTemporalReverseMinDuration(const PackedGeometryID /*id*/) const override
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
     DatasourceForwardRange GetUncompressedForwardDatasources(const EdgeID /*id*/) const override
     {
         return {};

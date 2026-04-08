@@ -6,8 +6,46 @@
 #include "storage/serialization.hpp"
 #include "storage/tar.hpp"
 
+#include <filesystem>
+#include <iterator>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
 namespace osrm::customizer::files
 {
+namespace detail
+{
+inline std::unordered_set<std::string> listTarEntries(const std::filesystem::path &path)
+{
+    storage::tar::FileReader reader{path, storage::tar::FileReader::VerifyFingerprint};
+    std::vector<storage::tar::FileReader::FileEntry> entries;
+    reader.List(std::back_inserter(entries));
+
+    std::unordered_set<std::string> names;
+    names.reserve(entries.size());
+    for (const auto &entry : entries)
+    {
+        names.insert(entry.name);
+    }
+    return names;
+}
+
+template <typename T>
+inline void readIfPresent(const std::filesystem::path &path,
+                          const std::unordered_set<std::string> &entries,
+                          const std::string &name,
+                          T &target)
+{
+    if (!entries.contains(name))
+    {
+        return;
+    }
+
+    storage::tar::FileReader reader{path, storage::tar::FileReader::VerifyFingerprint};
+    storage::serialization::read(reader, name, target);
+}
+} // namespace detail
 
 inline void writeTemporalProfileIndex(const std::filesystem::path &path,
                                       const TemporalProfileIndex &index)
@@ -56,11 +94,28 @@ inline void writeTemporalProfiles(const std::filesystem::path &path,
         writer, "/common/temporal_profiles/profile_offsets", profiles.profile_offsets);
     storage::serialization::write(
         writer, "/common/temporal_profiles/profile_sizes", profiles.profile_sizes);
-    storage::serialization::write(
-        writer, "/common/temporal_profiles/freeflow_speeds", profiles.freeflow_speeds);
-    storage::serialization::write(
-        writer, "/common/temporal_profiles/constrained_speeds", profiles.constrained_speeds);
-    storage::serialization::write(writer, "/common/temporal_profiles/values", profiles.values);
+
+    if (!profiles.min_durations.empty())
+    {
+        storage::serialization::write(
+            writer, "/common/temporal_profiles/min_durations", profiles.min_durations);
+    }
+
+    if (!profiles.freeflow_durations.empty())
+    {
+        storage::serialization::write(
+            writer, "/common/temporal_profiles/freeflow_durations", profiles.freeflow_durations);
+    }
+
+    if (!profiles.values.empty())
+    {
+        storage::serialization::write(writer, "/common/temporal_profiles/values", profiles.values);
+    }
+
+    if (!profiles.coeffs.empty())
+    {
+        storage::serialization::write(writer, "/common/temporal_profiles/coeffs", profiles.coeffs);
+    }
 }
 
 inline void readTemporalProfiles(const std::filesystem::path &path,
@@ -73,11 +128,18 @@ inline void readTemporalProfiles(const std::filesystem::path &path,
                                  profiles.profile_offsets);
     storage::serialization::read(
         reader, "/common/temporal_profiles/profile_sizes", profiles.profile_sizes);
-    storage::serialization::read(
-        reader, "/common/temporal_profiles/freeflow_speeds", profiles.freeflow_speeds);
-    storage::serialization::read(
-        reader, "/common/temporal_profiles/constrained_speeds", profiles.constrained_speeds);
-    storage::serialization::read(reader, "/common/temporal_profiles/values", profiles.values);
+
+    const auto entries = detail::listTarEntries(path);
+    detail::readIfPresent(path,
+                          entries,
+                          "/common/temporal_profiles/min_durations",
+                          profiles.min_durations);
+    detail::readIfPresent(path,
+                          entries,
+                          "/common/temporal_profiles/freeflow_durations",
+                          profiles.freeflow_durations);
+    detail::readIfPresent(path, entries, "/common/temporal_profiles/values", profiles.values);
+    detail::readIfPresent(path, entries, "/common/temporal_profiles/coeffs", profiles.coeffs);
 }
 
 inline void readTemporalProfiles(const std::filesystem::path &path,
@@ -90,11 +152,18 @@ inline void readTemporalProfiles(const std::filesystem::path &path,
                                  profiles.profile_offsets);
     storage::serialization::read(
         reader, "/common/temporal_profiles/profile_sizes", profiles.profile_sizes);
-    storage::serialization::read(
-        reader, "/common/temporal_profiles/freeflow_speeds", profiles.freeflow_speeds);
-    storage::serialization::read(
-        reader, "/common/temporal_profiles/constrained_speeds", profiles.constrained_speeds);
-    storage::serialization::read(reader, "/common/temporal_profiles/values", profiles.values);
+
+    const auto entries = detail::listTarEntries(path);
+    detail::readIfPresent(path,
+                          entries,
+                          "/common/temporal_profiles/min_durations",
+                          profiles.min_durations);
+    detail::readIfPresent(path,
+                          entries,
+                          "/common/temporal_profiles/freeflow_durations",
+                          profiles.freeflow_durations);
+    detail::readIfPresent(path, entries, "/common/temporal_profiles/values", profiles.values);
+    detail::readIfPresent(path, entries, "/common/temporal_profiles/coeffs", profiles.coeffs);
 }
 
 inline void writeTemporalMeta(const std::filesystem::path &path, const TemporalProfileMeta &meta)

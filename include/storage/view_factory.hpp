@@ -46,6 +46,27 @@ util::vector_view<T> make_vector_view(const SharedDataIndex &index, const std::s
     return util::vector_view<T>(index.GetBlockPtr<T>(name), index.GetBlockEntries(name));
 }
 
+inline bool has_block(const SharedDataIndex &index, const std::string &name)
+{
+    bool present = false;
+    index.List(name,
+               boost::make_function_output_iterator(
+                   [&](const auto &listed_name)
+                   {
+                       if (listed_name == name)
+                       {
+                           present = true;
+                       }
+                   }));
+    return present;
+}
+
+template <typename T>
+util::vector_view<T> make_optional_vector_view(const SharedDataIndex &index, const std::string &name)
+{
+    return has_block(index, name) ? make_vector_view<T>(index, name) : util::vector_view<T>{};
+}
+
 template <>
 inline util::vector_view<bool> make_vector_view(const SharedDataIndex &index,
                                                 const std::string &name)
@@ -181,21 +202,24 @@ inline auto make_temporal_profile_storage_view(const SharedDataIndex &index,
         index.GetBlockPtr<std::uint32_t>(name + "/bucket_size_minutes");
     auto week_bucket_count = index.GetBlockPtr<std::uint32_t>(name + "/week_bucket_count");
     auto encoding_version = index.GetBlockPtr<std::uint32_t>(name + "/encoding_version");
-    auto freeflow_speeds =
-        make_vector_view<customizer::TemporalProfileSpeedValue>(index, name + "/freeflow_speeds");
-    auto constrained_speeds = make_vector_view<customizer::TemporalProfileSpeedValue>(
-        index, name + "/constrained_speeds");
+    auto min_durations = make_optional_vector_view<customizer::TemporalProfileDurationValue>(
+        index, name + "/min_durations");
+    auto freeflow_durations = make_optional_vector_view<customizer::TemporalProfileDurationValue>(
+        index, name + "/freeflow_durations");
     auto values =
-        make_vector_view<customizer::TemporalProfileBucketValue>(index, name + "/values");
+        make_optional_vector_view<customizer::TemporalProfileBucketValue>(index, name + "/values");
+    auto coeffs =
+        make_optional_vector_view<customizer::TemporalProfileCoeffValue>(index, name + "/coeffs");
 
     return customizer::TemporalProfileStorageView{profile_offsets,
                                                   profile_sizes,
                                                   bucket_size_minutes,
                                                   week_bucket_count,
                                                   encoding_version,
-                                                  freeflow_speeds,
-                                                  constrained_speeds,
-                                                  values};
+                                                  min_durations,
+                                                  freeflow_durations,
+                                                  values,
+                                                  coeffs};
 }
 
 inline auto make_coordinates_view(const SharedDataIndex &index, const std::string &name)

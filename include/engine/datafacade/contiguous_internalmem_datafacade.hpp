@@ -372,6 +372,28 @@ class ContiguousInternalMemoryDataFacadeBase : public BaseDataFacade
             temporal_profile_index->GetReverseProfileID(id), week_bucket);
     }
 
+    EdgeDuration GetTemporalForwardMinDuration(const PackedGeometryID id) const override final
+    {
+        if (!HasTemporalForwardProfile(id))
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        return temporal_profile_storage->GetMinDuration(
+            temporal_profile_index->GetForwardProfileID(id));
+    }
+
+    EdgeDuration GetTemporalReverseMinDuration(const PackedGeometryID id) const override final
+    {
+        if (!HasTemporalReverseProfile(id))
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        return temporal_profile_storage->GetMinDuration(
+            temporal_profile_index->GetReverseProfileID(id));
+    }
+
     WeightForwardRange GetUncompressedForwardWeights(const PackedGeometryID id) const override final
     {
         return segment_data.GetForwardWeights(id);

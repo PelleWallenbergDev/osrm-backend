@@ -106,6 +106,8 @@ class BaseDataFacade
                                                     const std::uint32_t week_bucket) const = 0;
     virtual EdgeDuration GetTemporalReverseDuration(const PackedGeometryID id,
                                                     const std::uint32_t week_bucket) const = 0;
+    virtual EdgeDuration GetTemporalForwardMinDuration(const PackedGeometryID id) const = 0;
+    virtual EdgeDuration GetTemporalReverseMinDuration(const PackedGeometryID id) const = 0;
 
     // Returns the data source ids that were used to supply the edge
     // weights.  Will return an empty array when only the base profile is used.

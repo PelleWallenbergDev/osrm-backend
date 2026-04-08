@@ -4,6 +4,7 @@
 #include "updater/temporal_source.hpp"
 
 #include "customizer/temporal_files.hpp"
+#include "engine/temporal/temporal_profile_decoder.hpp"
 
 #include "extractor/compressed_edge_container.hpp"
 #include "extractor/edge_based_graph_factory.hpp"
@@ -334,18 +335,24 @@ customizer::TemporalProfileID
 registerTemporalProfile(const std::vector<customizer::TemporalProfileBucketValue> &profile,
                         std::map<std::vector<customizer::TemporalProfileBucketValue>,
                                  customizer::TemporalProfileID> &deduplicated_profiles,
-                        customizer::TemporalProfileStorage &storage)
+                        customizer::TemporalProfileStorage &storage,
+                        const std::uint32_t dct_coeff_count)
 {
     const auto [iterator, inserted] = deduplicated_profiles.try_emplace(
         profile, static_cast<customizer::TemporalProfileID>(deduplicated_profiles.size()));
 
     if (inserted)
     {
-        storage.profile_offsets.push_back(storage.values.size());
-        storage.profile_sizes.push_back(profile.size());
-        storage.values.insert(storage.values.end(), profile.begin(), profile.end());
-        storage.freeflow_speeds.push_back(0);
-        storage.constrained_speeds.push_back(0);
+        const auto coefficients =
+            engine::temporal::CompressTemporalProfileAdaptive(profile, dct_coeff_count);
+        const auto minimum_duration =
+            *std::min_element(profile.begin(), profile.end());
+
+        storage.profile_offsets.push_back(storage.coeffs.size());
+        storage.profile_sizes.push_back(static_cast<std::uint32_t>(coefficients.size()));
+        storage.min_durations.push_back(minimum_duration);
+        storage.freeflow_durations.push_back(minimum_duration);
+        storage.coeffs.insert(storage.coeffs.end(), coefficients.begin(), coefficients.end());
     }
 
     return iterator->second;
@@ -356,10 +363,11 @@ void writeTemporalSidecar(const UpdaterConfig &config,
                          const extractor::PackedOSMIDs &osm_node_ids,
                          const std::optional<TemporalLookupTable> &temporal_lookup)
 {
-    if (config.temporal_bucket_size_minutes == 0 || config.temporal_week_bucket_count == 0)
+    if (config.temporal_bucket_size_minutes == 0 || config.temporal_week_bucket_count == 0 ||
+        config.temporal_dct_coeff_count == 0)
     {
-        throw util::exception(std::string("Temporal sidecar requires non-zero bucket size and "
-                                          "week bucket count") +
+        throw util::exception(std::string("Temporal sidecar requires non-zero bucket size, "
+                                          "week bucket count, and DCT coefficient count") +
                               SOURCE_REF);
     }
 
@@ -378,10 +386,13 @@ void writeTemporalSidecar(const UpdaterConfig &config,
     customizer::TemporalProfileStorage profile_storage;
     profile_storage.meta.bucket_size_minutes = config.temporal_bucket_size_minutes;
     profile_storage.meta.week_bucket_count = config.temporal_week_bucket_count;
-    profile_storage.meta.encoding_version = customizer::TEMPORAL_PROFILE_ENCODING_VERSION_DENSE;
+    profile_storage.meta.encoding_version = customizer::TEMPORAL_PROFILE_ENCODING_VERSION_DCT;
 
     std::map<std::vector<customizer::TemporalProfileBucketValue>, customizer::TemporalProfileID>
         deduplicated_profiles;
+
+    const auto dct_coeff_count =
+        std::min(config.temporal_dct_coeff_count, config.temporal_week_bucket_count);
 
     for (const auto geometry_id :
          util::irange<PackedGeometryID>(0, segment_data.GetNumberOfGeometries()))
@@ -389,15 +400,15 @@ void writeTemporalSidecar(const UpdaterConfig &config,
         if (const auto forward_profile = buildTemporalGeometryProfile(
                 config, segment_data, osm_node_ids, geometry_id, true, segment_lookup))
         {
-            profile_index.forward_profile_ids[geometry_id] =
-                registerTemporalProfile(*forward_profile, deduplicated_profiles, profile_storage);
+            profile_index.forward_profile_ids[geometry_id] = registerTemporalProfile(
+                *forward_profile, deduplicated_profiles, profile_storage, dct_coeff_count);
         }
 
         if (const auto reverse_profile = buildTemporalGeometryProfile(
                 config, segment_data, osm_node_ids, geometry_id, false, segment_lookup))
         {
-            profile_index.reverse_profile_ids[geometry_id] =
-                registerTemporalProfile(*reverse_profile, deduplicated_profiles, profile_storage);
+            profile_index.reverse_profile_ids[geometry_id] = registerTemporalProfile(
+                *reverse_profile, deduplicated_profiles, profile_storage, dct_coeff_count);
         }
     }
 

@@ -94,6 +94,11 @@ return_code parseArguments(int argc,
                 &customization_config.updater_config.temporal_week_bucket_count)
                 ->default_value(672),
             "Number of temporal buckets stored per week")(
+            "temporal-dct-coeff-count",
+            boost::program_options::value<std::uint32_t>(
+                &customization_config.updater_config.temporal_dct_coeff_count)
+                ->default_value(200),
+            "Number of retained DCT coefficients per temporal profile")(
             "hit-fcd-forward-direction",
             boost::program_options::value<std::uint32_t>(
                 &customization_config.updater_config.hit_fcd_forward_direction)

@@ -76,6 +76,7 @@ struct UpdaterConfig final : storage::IOConfig
     bool write_temporal_sidecar = false;
     std::uint32_t temporal_bucket_size_minutes = 15;
     std::uint32_t temporal_week_bucket_count = 672;
+    std::uint32_t temporal_dct_coeff_count = 200;
     std::uint32_t hit_fcd_forward_direction = 1;
     std::uint32_t hit_fcd_reverse_direction = 2;
     std::string tz_file_path;
