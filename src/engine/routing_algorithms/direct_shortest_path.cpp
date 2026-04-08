@@ -2,6 +2,9 @@
 #include "engine/routing_algorithms/routing_base.hpp"
 #include "engine/routing_algorithms/routing_base_ch.hpp"
 #include "engine/routing_algorithms/routing_base_mld.hpp"
+#include "engine/routing_algorithms/temporal_asymmetric_mld.hpp"
+
+#include "util/for_each_pair.hpp"
 
 namespace osrm::engine::routing_algorithms
 {
@@ -83,6 +86,94 @@ InternalRouteResult directShortestPathSearch(SearchEngineData<mld::Algorithm> &e
                         endpoint_candidates,
                         unpacked_path.nodes,
                         unpacked_path.edges);
+}
+
+template <>
+InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
+    SearchEngineData<mld::Algorithm> &engine_working_data,
+    const DataFacade<mld::Algorithm> &facade,
+    const PhantomEndpointCandidates &endpoint_candidates,
+    std::time_t departure_timestamp)
+{
+    const auto source_endpoints =
+        mld::temporal::EnumerateSourceEndpoints(endpoint_candidates.source_phantoms);
+    const auto target_endpoints =
+        mld::temporal::EnumerateTargetEndpoints(endpoint_candidates.target_phantoms);
+
+    if (source_endpoints.empty() || target_endpoints.empty())
+    {
+        return {};
+    }
+
+    const auto incoming_edges = mld::temporal::BuildIncomingEdgeIndex(facade);
+
+    mld::temporal::TemporalAsymmetricPath best_path;
+    const PhantomNode *best_source_phantom = nullptr;
+    const PhantomNode *best_target_phantom = nullptr;
+
+    for (const auto &source : source_endpoints)
+    {
+        for (const auto &target : target_endpoints)
+        {
+            PhantomNodeCandidates source_candidates{*source.phantom};
+            PhantomNodeCandidates target_candidates{*target.phantom};
+            const PhantomEndpointCandidates specific_candidates{source_candidates, target_candidates};
+
+            std::optional<EdgeDuration> initial_upper_bound;
+            auto static_route =
+                routing_algorithms::directShortestPathSearch(engine_working_data,
+                                                             facade,
+                                                             specific_candidates);
+            if (static_route.is_valid())
+            {
+                const auto evaluation =
+                    engine::temporal::EvaluateRoute(facade, static_route, departure_timestamp);
+                initial_upper_bound = evaluation.total_duration;
+            }
+
+            const auto candidate = mld::temporal::Search(facade,
+                                                         source,
+                                                         target,
+                                                         departure_timestamp,
+                                                         incoming_edges,
+                                                         initial_upper_bound);
+
+            if (!candidate.is_valid() ||
+                (best_path.is_valid() && candidate.total_duration >= best_path.total_duration))
+            {
+                continue;
+            }
+
+            best_path = candidate;
+            best_source_phantom = source.phantom;
+            best_target_phantom = target.phantom;
+        }
+    }
+
+    if (!best_path.is_valid() || best_source_phantom == nullptr || best_target_phantom == nullptr)
+    {
+        return {};
+    }
+
+    std::vector<EdgeID> unpacked_edges;
+    if (best_path.nodes.size() > 1)
+    {
+        unpacked_edges.reserve(best_path.nodes.size() - 1);
+        util::for_each_pair(best_path.nodes.begin(),
+                            best_path.nodes.end(),
+                            [&facade, &unpacked_edges](const NodeID from, const NodeID to)
+                            { unpacked_edges.push_back(facade.FindEdge(from, to)); });
+    }
+
+    PhantomNodeCandidates source_candidates{*best_source_phantom};
+    PhantomNodeCandidates target_candidates{*best_target_phantom};
+    const PhantomEndpointCandidates best_candidates{source_candidates, target_candidates};
+
+    return extractRoute(facade,
+                        alias_cast<EdgeWeight>(best_path.total_duration),
+                        best_candidates,
+                        best_path.nodes,
+                        unpacked_edges);
 }
 
 } // namespace osrm::engine::routing_algorithms

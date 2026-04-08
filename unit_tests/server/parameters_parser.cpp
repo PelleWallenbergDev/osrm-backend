@@ -37,6 +37,7 @@ BOOST_TEST_DONT_PRINT_LOG_VALUE(std::optional<double>)
 BOOST_TEST_DONT_PRINT_LOG_VALUE(std::optional<osrm::engine::Approach>)
 BOOST_TEST_DONT_PRINT_LOG_VALUE(std::optional<osrm::engine::Bearing>)
 BOOST_TEST_DONT_PRINT_LOG_VALUE(std::optional<bool>)
+BOOST_TEST_DONT_PRINT_LOG_VALUE(osrm::engine::api::RouteParameters::TemporalRoutingMode)
 
 BOOST_AUTO_TEST_SUITE(api_parameters_parser)
 
@@ -96,6 +97,7 @@ BOOST_AUTO_TEST_CASE(invalid_route_urls)
     BOOST_CHECK_EQUAL(
         testInvalidOptions<RouteParameters>("1,2;3,4?annotations=&overview=simplified"), 20UL);
     BOOST_CHECK_EQUAL(testInvalidOptions<RouteParameters>("1,2;3,4?depart_at=foo"), 18UL);
+    BOOST_CHECK_EQUAL(testInvalidOptions<RouteParameters>("1,2;3,4?temporal_mode=foo"), 22UL);
 }
 
 BOOST_AUTO_TEST_CASE(invalid_table_urls)
@@ -552,6 +554,18 @@ BOOST_AUTO_TEST_CASE(valid_route_urls)
     BOOST_REQUIRE(result_22->departure_timestamp.has_value());
     BOOST_CHECK_EQUAL(*reference_22.departure_timestamp, *result_22->departure_timestamp);
     CHECK_EQUAL_RANGE(reference_22.coordinates, result_22->coordinates);
+
+    RouteParameters reference_23{};
+    reference_23.coordinates = coords_1;
+    reference_23.departure_timestamp = std::time_t{1735689600};
+    reference_23.temporal_routing_mode = RouteParameters::TemporalRoutingMode::Asymmetric;
+    auto result_23 = parseParameters<RouteParameters>(
+        "1,2;3,4?depart_at=1735689600&temporal_mode=asymmetric");
+    BOOST_CHECK(result_23);
+    BOOST_REQUIRE(result_23->departure_timestamp.has_value());
+    BOOST_CHECK_EQUAL(*reference_23.departure_timestamp, *result_23->departure_timestamp);
+    BOOST_CHECK_EQUAL(reference_23.temporal_routing_mode, result_23->temporal_routing_mode);
+    CHECK_EQUAL_RANGE(reference_23.coordinates, result_23->coordinates);
 }
 
 BOOST_AUTO_TEST_CASE(valid_table_urls)

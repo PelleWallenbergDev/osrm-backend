@@ -1,0 +1,478 @@
+#ifndef OSRM_ENGINE_ROUTING_ALGORITHMS_TEMPORAL_ASYMMETRIC_MLD_HPP
+#define OSRM_ENGINE_ROUTING_ALGORITHMS_TEMPORAL_ASYMMETRIC_MLD_HPP
+
+#include "engine/phantom_node.hpp"
+#include "engine/temporal_traffic.hpp"
+
+#include "util/typedefs.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <optional>
+#include <queue>
+#include <utility>
+#include <vector>
+
+namespace osrm::engine::routing_algorithms::mld::temporal
+{
+
+struct DirectedPhantomEndpoint
+{
+    const PhantomNode *phantom = nullptr;
+    NodeID node = SPECIAL_NODEID;
+    bool traversed_in_reverse = false;
+};
+
+struct TemporalAsymmetricPath
+{
+    EdgeDuration total_duration = INVALID_EDGE_DURATION;
+    std::vector<NodeID> nodes;
+
+    bool is_valid() const { return total_duration != INVALID_EDGE_DURATION && !nodes.empty(); }
+};
+
+namespace detail
+{
+struct IncomingEdge
+{
+    NodeID from = SPECIAL_NODEID;
+    EdgeID edge = SPECIAL_EDGEID;
+};
+
+struct QueueEntry
+{
+    EdgeDuration cost = INVALID_EDGE_DURATION;
+    NodeID node = SPECIAL_NODEID;
+};
+
+struct QueueCompare
+{
+    bool operator()(const QueueEntry &lhs, const QueueEntry &rhs) const
+    {
+        return from_alias<std::int32_t>(lhs.cost) > from_alias<std::int32_t>(rhs.cost);
+    }
+};
+
+inline bool IsInvalidDuration(const EdgeDuration duration)
+{
+    return duration == INVALID_EDGE_DURATION;
+}
+
+inline EdgeDuration SafeDurationAdd(const EdgeDuration lhs, const EdgeDuration rhs)
+{
+    if (IsInvalidDuration(lhs) || IsInvalidDuration(rhs))
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+    const auto sum = from_alias<std::int64_t>(lhs) + from_alias<std::int64_t>(rhs);
+    if (sum >= from_alias<std::int64_t>(INVALID_EDGE_DURATION))
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+    return to_alias<EdgeDuration>(sum);
+}
+
+inline EdgeDuration TurnPenaltyToDuration(const TurnPenalty penalty)
+{
+    return to_alias<EdgeDuration>(from_alias<std::int64_t>(penalty));
+}
+
+template <typename FacadeT>
+EdgeDuration GetNodeLowerBoundDuration(const FacadeT &facade, const NodeID node)
+{
+    const auto geometry_index = facade.GetGeometryIndex(node);
+    const auto temporal_min = geometry_index.forward
+                                  ? facade.GetTemporalForwardMinDuration(geometry_index.id)
+                                  : facade.GetTemporalReverseMinDuration(geometry_index.id);
+
+    if (temporal_min != INVALID_EDGE_DURATION)
+    {
+        return temporal_min;
+    }
+
+    return engine::temporal::GetStaticGeometryDuration(
+        facade, geometry_index.id, geometry_index.forward);
+}
+
+template <typename FacadeT>
+EdgeDuration GetNodeDurationAtClock(const FacadeT &facade,
+                                    const NodeID node,
+                                    const engine::temporal::TemporalClock clock)
+{
+    const auto geometry_index = facade.GetGeometryIndex(node);
+    return engine::temporal::GetGeometryDurationAtClock(
+               facade, geometry_index.id, geometry_index.forward, clock)
+        .duration;
+}
+
+template <typename FacadeT>
+EdgeDuration GetPhantomTraversalDurationAtClock(const FacadeT &facade,
+                                                const DirectedPhantomEndpoint &endpoint,
+                                                const engine::temporal::TemporalClock clock)
+{
+    const auto geometry_index = facade.GetGeometryIndex(endpoint.node);
+    const auto full_duration = engine::temporal::GetGeometryDurationAtClock(
+                                   facade, geometry_index.id, geometry_index.forward, clock)
+                                   .duration;
+    const auto static_total = engine::temporal::GetStaticGeometryDuration(
+        facade, geometry_index.id, geometry_index.forward);
+    const auto partial_duration =
+        engine::temporal::detail::GetTraversalDuration(*endpoint.phantom,
+                                                       endpoint.traversed_in_reverse);
+    return engine::temporal::detail::ScaleDurationProportionally(
+        partial_duration, static_total, full_duration);
+}
+
+template <typename FacadeT>
+EdgeDuration GetPhantomTraversalLowerBound(const FacadeT &facade,
+                                           const DirectedPhantomEndpoint &endpoint)
+{
+    const auto geometry_index = facade.GetGeometryIndex(endpoint.node);
+    auto full_duration = geometry_index.forward
+                             ? facade.GetTemporalForwardMinDuration(geometry_index.id)
+                             : facade.GetTemporalReverseMinDuration(geometry_index.id);
+
+    if (full_duration == INVALID_EDGE_DURATION)
+    {
+        full_duration = engine::temporal::GetStaticGeometryDuration(
+            facade, geometry_index.id, geometry_index.forward);
+    }
+
+    const auto static_total = engine::temporal::GetStaticGeometryDuration(
+        facade, geometry_index.id, geometry_index.forward);
+    const auto partial_duration =
+        engine::temporal::detail::GetTraversalDuration(*endpoint.phantom,
+                                                       endpoint.traversed_in_reverse);
+    return engine::temporal::detail::ScaleDurationProportionally(
+        partial_duration, static_total, full_duration);
+}
+
+template <typename FacadeT>
+EdgeDuration GetSourceRemainingDurationAtClock(const FacadeT &facade,
+                                               const DirectedPhantomEndpoint &source,
+                                               const engine::temporal::TemporalClock clock)
+{
+    const auto node_duration = GetNodeDurationAtClock(facade, source.node, clock);
+    const auto source_offset = GetPhantomTraversalDurationAtClock(facade, source, clock);
+    return std::max(node_duration - source_offset, EdgeDuration{0});
+}
+
+template <typename FacadeT>
+EdgeDuration GetSourceRemainingLowerBound(const FacadeT &facade,
+                                         const DirectedPhantomEndpoint &source)
+{
+    const auto node_duration = GetNodeLowerBoundDuration(facade, source.node);
+    const auto source_offset = GetPhantomTraversalLowerBound(facade, source);
+    return std::max(node_duration - source_offset, EdgeDuration{0});
+}
+
+template <typename FacadeT>
+EdgeDuration EvaluateLocalPathDuration(const FacadeT &facade,
+                                       const DirectedPhantomEndpoint &source,
+                                       const DirectedPhantomEndpoint &target,
+                                       const engine::temporal::TemporalClock departure_clock)
+{
+    const auto source_offset = GetPhantomTraversalDurationAtClock(facade, source, departure_clock);
+    const auto target_offset = GetPhantomTraversalDurationAtClock(facade, target, departure_clock);
+    return std::max(target_offset - source_offset, EdgeDuration{0});
+}
+
+template <typename FacadeT>
+std::vector<std::vector<IncomingEdge>> BuildIncomingEdgeIndex(const FacadeT &facade)
+{
+    std::vector<std::vector<IncomingEdge>> incoming_edges(facade.GetNumberOfNodes());
+
+    for (NodeID node = 0; node < facade.GetNumberOfNodes(); ++node)
+    {
+        for (const auto edge : facade.GetAdjacentEdgeRange(node))
+        {
+            if (!facade.IsForwardEdge(edge))
+            {
+                continue;
+            }
+
+            const auto target = facade.GetTarget(edge);
+            if (target < incoming_edges.size())
+            {
+                incoming_edges[target].push_back({node, edge});
+            }
+        }
+    }
+
+    return incoming_edges;
+}
+
+template <typename FacadeT>
+std::vector<EdgeDuration>
+ComputeReverseLowerBounds(const FacadeT &facade,
+                          const DirectedPhantomEndpoint &target,
+                          const std::vector<std::vector<IncomingEdge>> &incoming_edges)
+{
+    std::vector<EdgeDuration> lower_bounds(facade.GetNumberOfNodes(), INVALID_EDGE_DURATION);
+    std::priority_queue<QueueEntry, std::vector<QueueEntry>, QueueCompare> queue;
+
+    const auto target_lower_bound = GetPhantomTraversalLowerBound(facade, target);
+    lower_bounds[target.node] = target_lower_bound;
+    queue.push({target_lower_bound, target.node});
+
+    while (!queue.empty())
+    {
+        const auto current = queue.top();
+        queue.pop();
+
+        if (current.cost != lower_bounds[current.node])
+        {
+            continue;
+        }
+
+        for (const auto &incoming : incoming_edges[current.node])
+        {
+            const auto &edge_data = facade.GetEdgeData(incoming.edge);
+            const auto turn_penalty =
+                TurnPenaltyToDuration(facade.GetDurationPenaltyForEdgeID(edge_data.turn_id));
+            const auto predecessor_duration = GetNodeLowerBoundDuration(facade, incoming.from);
+            const auto edge_cost = SafeDurationAdd(predecessor_duration, turn_penalty);
+            const auto candidate = SafeDurationAdd(current.cost, edge_cost);
+
+            if (candidate == INVALID_EDGE_DURATION)
+            {
+                continue;
+            }
+
+            if (lower_bounds[incoming.from] == INVALID_EDGE_DURATION ||
+                candidate < lower_bounds[incoming.from])
+            {
+                lower_bounds[incoming.from] = candidate;
+                queue.push({candidate, incoming.from});
+            }
+        }
+    }
+
+    return lower_bounds;
+}
+
+template <typename FacadeT>
+TemporalAsymmetricPath SearchWithIncomingEdges(
+    const FacadeT &facade,
+    const DirectedPhantomEndpoint &source,
+    const DirectedPhantomEndpoint &target,
+    const std::time_t departure_timestamp,
+    const std::vector<std::vector<IncomingEdge>> &incoming_edges,
+    const std::optional<EdgeDuration> initial_upper_bound = std::nullopt)
+{
+    TemporalAsymmetricPath best_path;
+    auto best_upper_bound = initial_upper_bound.value_or(INVALID_EDGE_DURATION);
+    const auto departure_clock = engine::temporal::ToTemporalClock(departure_timestamp);
+
+    if (source.node == target.node)
+    {
+        const auto local_duration =
+            EvaluateLocalPathDuration(facade, source, target, departure_clock);
+        best_path.total_duration = local_duration;
+        best_path.nodes = {source.node};
+        best_upper_bound = local_duration;
+    }
+
+    const auto reverse_lower_bounds =
+        ComputeReverseLowerBounds(facade, target, incoming_edges);
+    if (source.node >= reverse_lower_bounds.size() ||
+        reverse_lower_bounds[source.node] == INVALID_EDGE_DURATION)
+    {
+        return best_path;
+    }
+
+    std::vector<EdgeDuration> settled_costs(facade.GetNumberOfNodes(), INVALID_EDGE_DURATION);
+    std::vector<NodeID> parents(facade.GetNumberOfNodes(), SPECIAL_NODEID);
+    std::priority_queue<QueueEntry, std::vector<QueueEntry>, QueueCompare> queue;
+
+    settled_costs[source.node] = EdgeDuration{0};
+    parents[source.node] = source.node;
+    queue.push({EdgeDuration{0}, source.node});
+
+    while (!queue.empty())
+    {
+        const auto current = queue.top();
+        queue.pop();
+
+        if (current.cost != settled_costs[current.node])
+        {
+            continue;
+        }
+
+        auto lower_bound = reverse_lower_bounds[current.node];
+        if (lower_bound == INVALID_EDGE_DURATION)
+        {
+            continue;
+        }
+
+        if (current.node == source.node && current.cost == EdgeDuration{0})
+        {
+            lower_bound = GetSourceRemainingLowerBound(facade, source);
+            lower_bound = SafeDurationAdd(
+                lower_bound,
+                std::max(reverse_lower_bounds[source.node] -
+                             GetNodeLowerBoundDuration(facade, source.node),
+                         EdgeDuration{0}));
+        }
+
+        if (best_upper_bound != INVALID_EDGE_DURATION &&
+            SafeDurationAdd(current.cost, lower_bound) >= best_upper_bound)
+        {
+            continue;
+        }
+
+        if (current.node == target.node &&
+            (current.cost > EdgeDuration{0} || source.node != target.node))
+        {
+            const auto arrival_clock =
+                engine::temporal::AdvanceTemporalClock(departure_clock, current.cost);
+            const auto target_duration =
+                GetPhantomTraversalDurationAtClock(facade, target, arrival_clock);
+            const auto candidate_total = SafeDurationAdd(current.cost, target_duration);
+
+            if (candidate_total != INVALID_EDGE_DURATION &&
+                (best_upper_bound == INVALID_EDGE_DURATION || candidate_total < best_upper_bound))
+            {
+                best_upper_bound = candidate_total;
+
+                std::vector<NodeID> nodes;
+                auto trace = current.node;
+                while (trace != SPECIAL_NODEID)
+                {
+                    nodes.push_back(trace);
+                    if (trace == parents[trace])
+                    {
+                        break;
+                    }
+                    trace = parents[trace];
+                }
+                std::reverse(nodes.begin(), nodes.end());
+                best_path.total_duration = candidate_total;
+                best_path.nodes = std::move(nodes);
+            }
+        }
+
+        const auto current_clock =
+            engine::temporal::AdvanceTemporalClock(departure_clock, current.cost);
+        const auto node_duration =
+            current.node == source.node && current.cost == EdgeDuration{0}
+                ? GetSourceRemainingDurationAtClock(facade, source, current_clock)
+                : GetNodeDurationAtClock(facade, current.node, current_clock);
+
+        for (const auto edge : facade.GetAdjacentEdgeRange(current.node))
+        {
+            if (!facade.IsForwardEdge(edge))
+            {
+                continue;
+            }
+
+            const auto target_node = facade.GetTarget(edge);
+            if (facade.ExcludeNode(target_node))
+            {
+                continue;
+            }
+
+            const auto &edge_data = facade.GetEdgeData(edge);
+            const auto turn_penalty =
+                TurnPenaltyToDuration(facade.GetDurationPenaltyForEdgeID(edge_data.turn_id));
+            const auto edge_cost = SafeDurationAdd(node_duration, turn_penalty);
+            const auto candidate_cost = SafeDurationAdd(current.cost, edge_cost);
+
+            if (candidate_cost == INVALID_EDGE_DURATION)
+            {
+                continue;
+            }
+
+            if (settled_costs[target_node] == INVALID_EDGE_DURATION ||
+                candidate_cost < settled_costs[target_node])
+            {
+                settled_costs[target_node] = candidate_cost;
+                parents[target_node] = current.node;
+                queue.push({candidate_cost, target_node});
+            }
+        }
+    }
+
+    return best_path;
+}
+} // namespace detail
+
+inline std::vector<DirectedPhantomEndpoint>
+EnumerateSourceEndpoints(const PhantomNodeCandidates &source_candidates)
+{
+    std::vector<DirectedPhantomEndpoint> endpoints;
+    endpoints.reserve(source_candidates.size() * 2);
+
+    for (const auto &phantom : source_candidates)
+    {
+        if (phantom.IsValidForwardSource())
+        {
+            endpoints.push_back({&phantom, phantom.forward_segment_id.id, false});
+        }
+        if (phantom.IsValidReverseSource())
+        {
+            endpoints.push_back({&phantom, phantom.reverse_segment_id.id, true});
+        }
+    }
+
+    return endpoints;
+}
+
+inline std::vector<DirectedPhantomEndpoint>
+EnumerateTargetEndpoints(const PhantomNodeCandidates &target_candidates)
+{
+    std::vector<DirectedPhantomEndpoint> endpoints;
+    endpoints.reserve(target_candidates.size() * 2);
+
+    for (const auto &phantom : target_candidates)
+    {
+        if (phantom.IsValidForwardTarget())
+        {
+            endpoints.push_back({&phantom, phantom.forward_segment_id.id, false});
+        }
+        if (phantom.IsValidReverseTarget())
+        {
+            endpoints.push_back({&phantom, phantom.reverse_segment_id.id, true});
+        }
+    }
+
+    return endpoints;
+}
+
+template <typename FacadeT>
+std::vector<std::vector<detail::IncomingEdge>> BuildIncomingEdgeIndex(const FacadeT &facade)
+{
+    return detail::BuildIncomingEdgeIndex(facade);
+}
+
+template <typename FacadeT>
+TemporalAsymmetricPath Search(const FacadeT &facade,
+                              const DirectedPhantomEndpoint &source,
+                              const DirectedPhantomEndpoint &target,
+                              const std::time_t departure_timestamp,
+                              const std::optional<EdgeDuration> initial_upper_bound =
+                                  std::nullopt)
+{
+    const auto incoming_edges = detail::BuildIncomingEdgeIndex(facade);
+    return detail::SearchWithIncomingEdges(
+        facade, source, target, departure_timestamp, incoming_edges, initial_upper_bound);
+}
+
+template <typename FacadeT>
+TemporalAsymmetricPath Search(const FacadeT &facade,
+                              const DirectedPhantomEndpoint &source,
+                              const DirectedPhantomEndpoint &target,
+                              const std::time_t departure_timestamp,
+                              const std::vector<std::vector<detail::IncomingEdge>> &incoming_edges,
+                              const std::optional<EdgeDuration> initial_upper_bound =
+                                  std::nullopt)
+{
+    return detail::SearchWithIncomingEdges(
+        facade, source, target, departure_timestamp, incoming_edges, initial_upper_bound);
+}
+
+} // namespace osrm::engine::routing_algorithms::mld::temporal
+
+#endif

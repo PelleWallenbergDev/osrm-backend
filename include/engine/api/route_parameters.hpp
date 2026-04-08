@@ -76,6 +76,11 @@ struct RouteParameters : public BaseParameters
         Speed = 0x20,
         All = Duration | Nodes | Distance | Weight | Datasources | Speed
     };
+    enum class TemporalRoutingMode
+    {
+        None,
+        Asymmetric
+    };
 
     RouteParameters() = default;
 
@@ -177,6 +182,7 @@ struct RouteParameters : public BaseParameters
     std::optional<bool> continue_straight;
     std::vector<std::size_t> waypoints;
     std::optional<std::time_t> departure_timestamp;
+    TemporalRoutingMode temporal_routing_mode = TemporalRoutingMode::None;
 
     bool IsValid() const
     {

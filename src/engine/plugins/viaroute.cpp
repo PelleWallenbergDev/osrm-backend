@@ -28,8 +28,12 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
                                      osrm::engine::api::ResultT &result) const
 {
     BOOST_ASSERT(route_parameters.IsValid());
+    const auto use_temporal_asymmetric_routing =
+        route_parameters.temporal_routing_mode ==
+        api::RouteParameters::TemporalRoutingMode::Asymmetric;
 
-    if (!algorithms.HasShortestPathSearch() && route_parameters.coordinates.size() > 2)
+    if (!use_temporal_asymmetric_routing && !algorithms.HasShortestPathSearch() &&
+        route_parameters.coordinates.size() > 2)
     {
         return Error("NotImplemented",
                      "Shortest path search is not implemented for the chosen search algorithm. "
@@ -37,7 +41,8 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
                      result);
     }
 
-    if (!algorithms.HasDirectShortestPathSearch() && !algorithms.HasShortestPathSearch())
+    if (!use_temporal_asymmetric_routing && !algorithms.HasDirectShortestPathSearch() &&
+        !algorithms.HasShortestPathSearch())
     {
         return Error(
             "NotImplemented",
@@ -105,13 +110,48 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
 
     InternalManyRoutesResult routes;
     const auto use_temporal_candidate_reranking =
-        route_parameters.departure_timestamp && 2 == snapped_phantoms.size() &&
+        !use_temporal_asymmetric_routing && route_parameters.departure_timestamp &&
+        2 == snapped_phantoms.size() &&
         algorithms.HasAlternativePathSearch() && max_alternatives > 0;
 
     // Alternatives do not support vias, only direct s,t queries supported
     // See the implementation notes and high-level outline.
     // https://github.com/Project-OSRM/osrm-backend/issues/3905
-    if (use_temporal_candidate_reranking)
+    if (use_temporal_asymmetric_routing)
+    {
+        if (!route_parameters.departure_timestamp)
+        {
+            return Error("InvalidValue",
+                         "temporal_mode=asymmetric requires depart_at.",
+                         result);
+        }
+
+        if (2 != snapped_phantoms.size())
+        {
+            return Error("NotImplemented",
+                         "temporal_mode=asymmetric currently supports only two coordinates.",
+                         result);
+        }
+
+        if (wants_alternatives)
+        {
+            return Error("NotImplemented",
+                         "temporal_mode=asymmetric does not support alternatives.",
+                         result);
+        }
+
+        if (!algorithms.HasTemporalAsymmetricDirectShortestPathSearch())
+        {
+            return Error(
+                "NotImplemented",
+                "Temporal asymmetric routing is not implemented for the chosen search algorithm.",
+                result);
+        }
+
+        routes = algorithms.TemporalAsymmetricDirectShortestPathSearch(
+            {snapped_phantoms[0], snapped_phantoms[1]}, *route_parameters.departure_timestamp);
+    }
+    else if (use_temporal_candidate_reranking)
     {
         const auto temporal_candidate_count = wants_alternatives ? number_of_alternatives : 1u;
         routes = algorithms.AlternativePathSearch({snapped_phantoms[0], snapped_phantoms[1]},

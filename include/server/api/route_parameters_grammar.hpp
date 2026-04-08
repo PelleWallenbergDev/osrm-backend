@@ -39,7 +39,11 @@ struct RouteParametersGrammar : public BaseParametersGrammar<Iterator, Signature
                             qi::_1])) |
             (qi::lit("depart_at=") >
              qi::ulong_long[ph::bind(&engine::api::RouteParameters::departure_timestamp, qi::_r1) =
-                                qi::_1]);
+                                qi::_1]) |
+            (qi::lit("temporal_mode=") >
+             temporal_routing_mode
+                 [ph::bind(&engine::api::RouteParameters::temporal_routing_mode, qi::_r1) =
+                      qi::_1]);
 
         root_rule = query_rule(qi::_r1) > BaseGrammar::format_rule(qi::_r1) >
                     -('?' > (route_rule(qi::_r1) | base_rule(qi::_r1)) % '&');
@@ -78,6 +82,8 @@ struct RouteParametersGrammar : public BaseParametersGrammar<Iterator, Signature
                                                                     AnnotationsType::Nodes)(
             "distance", AnnotationsType::Distance)("weight", AnnotationsType::Weight)(
             "datasources", AnnotationsType::Datasources)("speed", AnnotationsType::Speed);
+        temporal_routing_mode.add(
+            "asymmetric", engine::api::RouteParameters::TemporalRoutingMode::Asymmetric);
 
         waypoints_rule =
             qi::lit("waypoints=") >
@@ -113,6 +119,7 @@ struct RouteParametersGrammar : public BaseParametersGrammar<Iterator, Signature
     qi::symbols<char, engine::api::RouteParameters::GeometriesType> geometries_type;
     qi::symbols<char, engine::api::RouteParameters::OverviewType> overview_type;
     qi::symbols<char, engine::api::RouteParameters::AnnotationsType> annotations_type;
+    qi::symbols<char, engine::api::RouteParameters::TemporalRoutingMode> temporal_routing_mode;
 };
 } // namespace osrm::server::api
 

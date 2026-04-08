@@ -11,6 +11,8 @@
 #include "engine/routing_algorithms/shortest_path.hpp"
 #include "engine/routing_algorithms/tile_turns.hpp"
 
+#include <ctime>
+
 namespace osrm::engine
 {
 
@@ -29,6 +31,10 @@ class RoutingAlgorithmsInterface
 
     virtual InternalRouteResult
     DirectShortestPathSearch(const PhantomEndpointCandidates &endpoint_candidates) const = 0;
+
+    virtual InternalRouteResult TemporalAsymmetricDirectShortestPathSearch(
+        const PhantomEndpointCandidates &endpoint_candidates,
+        std::time_t departure_timestamp) const = 0;
 
     virtual std::pair<std::vector<EdgeDuration>, std::vector<EdgeDistance>>
     ManyToManySearch(const std::vector<PhantomNodeCandidates> &candidates_list,
@@ -52,6 +58,7 @@ class RoutingAlgorithmsInterface
     virtual bool HasAlternativePathSearch() const = 0;
     virtual bool HasShortestPathSearch() const = 0;
     virtual bool HasDirectShortestPathSearch() const = 0;
+    virtual bool HasTemporalAsymmetricDirectShortestPathSearch() const = 0;
     virtual bool HasMapMatching() const = 0;
     virtual bool HasManyToManySearch() const = 0;
     virtual bool SupportsDistanceAnnotationType() const = 0;
@@ -82,6 +89,10 @@ template <typename Algorithm> class RoutingAlgorithms final : public RoutingAlgo
 
     InternalRouteResult DirectShortestPathSearch(
         const PhantomEndpointCandidates &endpoint_candidates) const final override;
+
+    InternalRouteResult TemporalAsymmetricDirectShortestPathSearch(
+        const PhantomEndpointCandidates &endpoint_candidates,
+        std::time_t departure_timestamp) const final override;
 
     std::pair<std::vector<EdgeDuration>, std::vector<EdgeDistance>>
     ManyToManySearch(const std::vector<PhantomNodeCandidates> &candidates_list,
@@ -115,6 +126,11 @@ template <typename Algorithm> class RoutingAlgorithms final : public RoutingAlgo
     bool HasDirectShortestPathSearch() const final override
     {
         return routing_algorithms::HasDirectShortestPathSearch<Algorithm>::value;
+    }
+
+    bool HasTemporalAsymmetricDirectShortestPathSearch() const final override
+    {
+        return routing_algorithms::HasTemporalAsymmetricDirectShortestPathSearch<Algorithm>::value;
     }
 
     bool HasMapMatching() const final override
@@ -171,6 +187,25 @@ InternalRouteResult RoutingAlgorithms<Algorithm>::DirectShortestPathSearch(
     const PhantomEndpointCandidates &endpoint_candidates) const
 {
     return routing_algorithms::directShortestPathSearch(heaps, *facade, endpoint_candidates);
+}
+
+template <typename Algorithm>
+InternalRouteResult RoutingAlgorithms<Algorithm>::TemporalAsymmetricDirectShortestPathSearch(
+    const PhantomEndpointCandidates &endpoint_candidates,
+    std::time_t departure_timestamp) const
+{
+    if constexpr (routing_algorithms::HasTemporalAsymmetricDirectShortestPathSearch<
+                      Algorithm>::value)
+    {
+        return routing_algorithms::temporalAsymmetricDirectShortestPathSearch(
+            heaps, *facade, endpoint_candidates, departure_timestamp);
+    }
+    else
+    {
+        (void)endpoint_candidates;
+        (void)departure_timestamp;
+        return {};
+    }
 }
 
 template <typename Algorithm>
