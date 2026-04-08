@@ -159,6 +159,146 @@ class TemporalRouteFacade final : public test::MockBaseDataFacade
     }();
 };
 
+class SubsecondTemporalRouteFacade final : public test::MockBaseDataFacade
+{
+  public:
+    util::Coordinate GetCoordinateOfNode(const NodeID node_based_node_id) const override
+    {
+        switch (node_based_node_id)
+        {
+        case 10:
+            return {util::FloatLongitude{0.0}, util::FloatLatitude{0.0}};
+        case 11:
+            return {util::FloatLongitude{0.001}, util::FloatLatitude{0.0}};
+        case 12:
+            return {util::FloatLongitude{0.002}, util::FloatLatitude{0.0}};
+        default:
+            return {util::FloatLongitude{0.0}, util::FloatLatitude{0.0}};
+        }
+    }
+
+    GeometryID GetGeometryIndex(const NodeID edge_based_node_id) const override
+    {
+        return edge_based_node_id == 1 ? GeometryID{7, true} : GeometryID{};
+    }
+
+    ComponentID GetComponentID(const NodeID) const override { return ComponentID{1, 0}; }
+
+    NodeForwardRange GetUncompressedForwardGeometry(const PackedGeometryID) const override
+    {
+        return NodeForwardRange(geometry_nodes.cbegin(), geometry_nodes.cend());
+    }
+
+    NodeReverseRange GetUncompressedReverseGeometry(const PackedGeometryID id) const override
+    {
+        return NodeReverseRange(GetUncompressedForwardGeometry(id));
+    }
+
+    WeightForwardRange GetUncompressedForwardWeights(const PackedGeometryID) const override
+    {
+        return WeightForwardRange(forward_weights.cbegin(), forward_weights.cend());
+    }
+
+    WeightReverseRange GetUncompressedReverseWeights(const PackedGeometryID id) const override
+    {
+        return WeightReverseRange(GetUncompressedForwardWeights(id));
+    }
+
+    DurationForwardRange GetUncompressedForwardDurations(const PackedGeometryID) const override
+    {
+        return DurationForwardRange(forward_durations.cbegin(), forward_durations.cend());
+    }
+
+    DurationReverseRange GetUncompressedReverseDurations(const PackedGeometryID id) const override
+    {
+        return DurationReverseRange(GetUncompressedForwardDurations(id));
+    }
+
+    DatasourceForwardRange GetUncompressedForwardDatasources(const PackedGeometryID) const override
+    {
+        return DatasourceForwardRange(datasources.cbegin(), datasources.cend());
+    }
+
+    DatasourceReverseRange GetUncompressedReverseDatasources(const PackedGeometryID id) const override
+    {
+        return DatasourceReverseRange(GetUncompressedForwardDatasources(id));
+    }
+
+    extractor::TravelMode GetTravelMode(const NodeID) const override
+    {
+        return extractor::TRAVEL_MODE_DRIVING;
+    }
+
+    bool HasTemporalForwardProfile(const PackedGeometryID id) const override { return id == 7; }
+
+    bool HasTemporalReverseProfile(const PackedGeometryID) const override { return false; }
+
+    std::uint32_t GetTemporalBucketSizeMinutes() const override { return 15; }
+
+    std::uint32_t GetTemporalWeekBucketCount() const override { return 672; }
+
+    EdgeDuration GetTemporalForwardDuration(const PackedGeometryID geometry_id,
+                                            const std::uint32_t week_bucket) const override
+    {
+        if (geometry_id != 7)
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        if (week_bucket == 192)
+        {
+            return EdgeDuration{6};
+        }
+
+        if (week_bucket == 193)
+        {
+            return EdgeDuration{50};
+        }
+
+        return INVALID_EDGE_DURATION;
+    }
+
+    EdgeDuration GetTemporalReverseDuration(const PackedGeometryID,
+                                            const std::uint32_t) const override
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+  private:
+    static constexpr std::uint64_t PackFirstTwo22BitValues(const std::uint32_t first,
+                                                           const std::uint32_t second)
+    {
+        return static_cast<std::uint64_t>(first) |
+               (static_cast<std::uint64_t>(second) << SEGMENT_DURATION_BITS);
+    }
+
+    const extractor::SegmentDataView::SegmentNodeVector geometry_nodes = []()
+    {
+        static NodeID geometry_node_data[] = {10, 11, 12};
+        return extractor::SegmentDataView::SegmentNodeVector(geometry_node_data, 3);
+    }();
+
+    const extractor::SegmentDataView::SegmentWeightVector forward_weights = []()
+    {
+        static std::uint64_t forward_weight_words[] = {PackFirstTwo22BitValues(60, 40), 0};
+        return extractor::SegmentDataView::SegmentWeightVector(
+            util::vector_view<std::uint64_t>(forward_weight_words, 2), 2);
+    }();
+
+    const extractor::SegmentDataView::SegmentDurationVector forward_durations = []()
+    {
+        static std::uint64_t forward_duration_words[] = {PackFirstTwo22BitValues(60, 40), 0};
+        return extractor::SegmentDataView::SegmentDurationVector(
+            util::vector_view<std::uint64_t>(forward_duration_words, 2), 2);
+    }();
+
+    const util::vector_view<DatasourceID> datasources = []()
+    {
+        static DatasourceID datasource_data[] = {0, 0};
+        return util::vector_view<DatasourceID>(datasource_data, 2);
+    }();
+};
+
 class InspectableRouteAPI final : public engine::api::RouteAPI
 {
   public:
@@ -218,6 +358,41 @@ engine::InternalManyRoutesResult MakeTwoLegRouteResult()
     route.source_traversed_in_reverse = {false, false};
     route.target_traversed_in_reverse = {false, false};
     route.unpacked_path_segments = {
+        {engine::PathData{1,
+                          11,
+                          EdgeWeight{60},
+                          EdgeWeight{0},
+                          EdgeDuration{60},
+                          EdgeDuration{0},
+                          DatasourceID{0},
+                          std::nullopt}},
+        {engine::PathData{1,
+                          11,
+                          EdgeWeight{60},
+                          EdgeWeight{0},
+                          EdgeDuration{60},
+                          EdgeDuration{0},
+                          DatasourceID{0},
+                          std::nullopt}}};
+    return engine::InternalManyRoutesResult{std::move(route)};
+}
+
+engine::InternalManyRoutesResult MakeThreeLegRouteResult()
+{
+    engine::InternalRouteResult route;
+    route.shortest_path_weight = EdgeWeight{300};
+    route.leg_endpoints = {MakePhantoms(), MakePhantoms(), MakePhantoms()};
+    route.source_traversed_in_reverse = {false, false, false};
+    route.target_traversed_in_reverse = {false, false, false};
+    route.unpacked_path_segments = {
+        {engine::PathData{1,
+                          11,
+                          EdgeWeight{60},
+                          EdgeWeight{0},
+                          EdgeDuration{60},
+                          EdgeDuration{0},
+                          DatasourceID{0},
+                          std::nullopt}},
         {engine::PathData{1,
                           11,
                           EdgeWeight{60},
@@ -365,6 +540,33 @@ BOOST_AUTO_TEST_CASE(make_response_advances_departure_time_between_legs)
     BOOST_CHECK_EQUAL(ExtractRouteDuration(json), 50.0);
     BOOST_CHECK_EQUAL(ExtractLegDuration(json, 0), 20.0);
     BOOST_CHECK_EQUAL(ExtractLegDuration(json, 1), 30.0);
+}
+
+BOOST_AUTO_TEST_CASE(make_response_keeps_decisecond_precision_across_multiple_legs)
+{
+    SubsecondTemporalRouteFacade facade;
+    auto parameters = MakeParameters();
+    parameters.departure_timestamp = std::time_t{1735690499};
+
+    InspectableRouteAPI route_api{facade, parameters};
+    const auto route_result = MakeThreeLegRouteResult();
+    const auto legs_info = route_api.MakeLegs(route_result.routes.front().leg_endpoints,
+                                              route_result.routes.front().unpacked_path_segments,
+                                              route_result.routes.front().source_traversed_in_reverse,
+                                              route_result.routes.front().target_traversed_in_reverse);
+    BOOST_REQUIRE_EQUAL(legs_info.first.size(), 3UL);
+    BOOST_CHECK_EQUAL(legs_info.first[0].duration, 0.6);
+    BOOST_CHECK_EQUAL(legs_info.first[1].duration, 0.6);
+    BOOST_CHECK_EQUAL(legs_info.first[2].duration, 5.0);
+
+    engine::api::ResultT response = util::json::Object{};
+    route_api.MakeResponse(route_result, {}, response);
+
+    const auto &json = std::get<util::json::Object>(response);
+    BOOST_CHECK_EQUAL(ExtractRouteDuration(json), 6.2);
+    BOOST_CHECK_EQUAL(ExtractLegDuration(json, 0), 0.6);
+    BOOST_CHECK_EQUAL(ExtractLegDuration(json, 1), 0.6);
+    BOOST_CHECK_EQUAL(ExtractLegDuration(json, 2), 5.0);
 }
 
 BOOST_AUTO_TEST_CASE(make_response_falls_back_to_static_duration_without_temporal_profile)

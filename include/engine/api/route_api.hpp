@@ -932,7 +932,12 @@ class RouteAPI : public BaseAPI
         auto number_of_legs = leg_endpoints.size();
         legs.reserve(number_of_legs);
         leg_geometries.reserve(number_of_legs);
-        auto current_departure_timestamp = parameters.departure_timestamp;
+        std::optional<temporal::TemporalClock> current_departure_timestamp_ds;
+        if (parameters.departure_timestamp)
+        {
+            current_departure_timestamp_ds =
+                temporal::ToTemporalClock(*parameters.departure_timestamp);
+        }
 
         for (auto idx : util::irange<std::size_t>(0UL, number_of_legs))
         {
@@ -946,19 +951,19 @@ class RouteAPI : public BaseAPI
             auto source_phantom = phantoms.source_phantom;
             auto target_phantom = phantoms.target_phantom;
 
-            if (current_departure_timestamp)
+            if (current_departure_timestamp_ds)
             {
-                auto temporal_leg = temporal::EvaluateRouteLeg(BaseAPI::facade,
-                                                               path_data,
-                                                               phantoms.source_phantom,
-                                                               phantoms.target_phantom,
-                                                               reversed_source,
-                                                               reversed_target,
-                                                               *current_departure_timestamp);
+                auto temporal_leg = temporal::EvaluateRouteLegAtClock(BaseAPI::facade,
+                                                                      path_data,
+                                                                      phantoms.source_phantom,
+                                                                      phantoms.target_phantom,
+                                                                      reversed_source,
+                                                                      reversed_target,
+                                                                      *current_departure_timestamp_ds);
                 temporal_path_data = std::move(temporal_leg.path_data);
                 source_phantom = std::move(temporal_leg.source_phantom);
                 target_phantom = std::move(temporal_leg.target_phantom);
-                current_departure_timestamp = temporal_leg.arrival_timestamp;
+                current_departure_timestamp_ds = temporal_leg.arrival_timestamp_ds;
             }
 
             auto leg = guidance::assembleLeg(facade,

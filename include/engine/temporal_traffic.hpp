@@ -17,6 +17,8 @@
 namespace osrm::engine::temporal
 {
 
+using TemporalClock = std::int64_t;
+
 struct TemporalGeometryStep
 {
     PackedGeometryID geometry_id = SPECIAL_GEOMETRYID;
@@ -36,6 +38,7 @@ struct TemporalPathEvaluation
 {
     EdgeDuration total_duration = EdgeDuration{0};
     std::time_t arrival_timestamp = 0;
+    TemporalClock arrival_timestamp_ds = 0;
     std::vector<TemporalStepResult> steps;
 };
 
@@ -52,6 +55,7 @@ struct TemporalLegEvaluation
     PhantomNode source_phantom;
     PhantomNode target_phantom;
     std::time_t arrival_timestamp = 0;
+    TemporalClock arrival_timestamp_ds = 0;
     bool used_temporal = false;
 };
 
@@ -59,6 +63,7 @@ struct TemporalRouteEvaluation
 {
     EdgeDuration total_duration = EdgeDuration{0};
     std::time_t arrival_timestamp = 0;
+    TemporalClock arrival_timestamp_ds = 0;
     bool used_temporal = false;
 };
 
@@ -217,9 +222,31 @@ inline std::uint32_t TimestampToWeekBucket(const std::time_t timestamp,
     return static_cast<std::uint32_t>(minutes_since_week_start / bucket_size_minutes);
 }
 
+inline TemporalClock ToTemporalClock(const std::time_t timestamp)
+{
+    return static_cast<TemporalClock>(timestamp) * 10;
+}
+
+inline std::time_t ToTimestamp(const TemporalClock timestamp_ds)
+{
+    return static_cast<std::time_t>(timestamp_ds / 10);
+}
+
+inline std::uint32_t TimestampToWeekBucketFromClock(const TemporalClock timestamp_ds,
+                                                    const std::uint32_t bucket_size_minutes)
+{
+    return TimestampToWeekBucket(ToTimestamp(timestamp_ds), bucket_size_minutes);
+}
+
 inline std::time_t AdvanceTimestamp(const std::time_t timestamp, const EdgeDuration duration)
 {
-    return timestamp + from_alias<std::int64_t>(duration) / 10;
+    return ToTimestamp(ToTemporalClock(timestamp) + from_alias<std::int64_t>(duration));
+}
+
+inline TemporalClock AdvanceTemporalClock(const TemporalClock timestamp_ds,
+                                          const EdgeDuration duration)
+{
+    return timestamp_ds + from_alias<std::int64_t>(duration);
 }
 
 template <typename FacadeT>
@@ -240,10 +267,10 @@ EdgeDuration GetStaticGeometryDuration(const FacadeT &facade,
 }
 
 template <typename FacadeT>
-TemporalGeometryDuration GetGeometryDurationAtTimestamp(const FacadeT &facade,
-                                                        const PackedGeometryID geometry_id,
-                                                        const bool forward,
-                                                        const std::time_t timestamp)
+TemporalGeometryDuration GetGeometryDurationAtClock(const FacadeT &facade,
+                                                    const PackedGeometryID geometry_id,
+                                                    const bool forward,
+                                                    const TemporalClock timestamp_ds)
 {
     TemporalGeometryDuration result;
     result.duration = GetStaticGeometryDuration(facade, geometry_id, forward);
@@ -256,7 +283,8 @@ TemporalGeometryDuration GetGeometryDurationAtTimestamp(const FacadeT &facade,
     }
 
     result.week_bucket =
-        std::min(TimestampToWeekBucket(timestamp, bucket_size_minutes), week_bucket_count - 1);
+        std::min(TimestampToWeekBucketFromClock(timestamp_ds, bucket_size_minutes),
+                 week_bucket_count - 1);
 
     const auto temporal_duration =
         forward ? facade.GetTemporalForwardDuration(geometry_id, result.week_bucket)
@@ -272,19 +300,29 @@ TemporalGeometryDuration GetGeometryDurationAtTimestamp(const FacadeT &facade,
 }
 
 template <typename FacadeT>
-TemporalLegEvaluation EvaluateRouteLeg(const FacadeT &facade,
-                                       const std::vector<PathData> &path_data,
-                                       const PhantomNode &source_phantom,
-                                       const PhantomNode &target_phantom,
-                                       const bool source_traversed_in_reverse,
-                                       const bool target_traversed_in_reverse,
-                                       const std::time_t departure_timestamp)
+TemporalGeometryDuration GetGeometryDurationAtTimestamp(const FacadeT &facade,
+                                                        const PackedGeometryID geometry_id,
+                                                        const bool forward,
+                                                        const std::time_t timestamp)
+{
+    return GetGeometryDurationAtClock(facade, geometry_id, forward, ToTemporalClock(timestamp));
+}
+
+template <typename FacadeT>
+TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
+                                              const std::vector<PathData> &path_data,
+                                              const PhantomNode &source_phantom,
+                                              const PhantomNode &target_phantom,
+                                              const bool source_traversed_in_reverse,
+                                              const bool target_traversed_in_reverse,
+                                              const TemporalClock departure_timestamp_ds)
 {
     TemporalLegEvaluation evaluation;
     evaluation.path_data = path_data;
     evaluation.source_phantom = source_phantom;
     evaluation.target_phantom = target_phantom;
-    evaluation.arrival_timestamp = departure_timestamp;
+    evaluation.arrival_timestamp_ds = departure_timestamp_ds;
+    evaluation.arrival_timestamp = ToTimestamp(departure_timestamp_ds);
 
     const auto target_node_id = target_traversed_in_reverse
                                     ? target_phantom.reverse_segment_id.id
@@ -299,8 +337,8 @@ TemporalLegEvaluation EvaluateRouteLeg(const FacadeT &facade,
                                         ? source_phantom.reverse_segment_id.id
                                         : source_phantom.forward_segment_id.id;
         const auto source_geometry = facade.GetGeometryIndex(source_node_id);
-        const auto geometry_duration = GetGeometryDurationAtTimestamp(
-            facade, source_geometry.id, source_geometry.forward, evaluation.arrival_timestamp);
+        const auto geometry_duration = GetGeometryDurationAtClock(
+            facade, source_geometry.id, source_geometry.forward, evaluation.arrival_timestamp_ds);
         const auto static_total =
             GetStaticGeometryDuration(facade, source_geometry.id, source_geometry.forward);
 
@@ -316,9 +354,10 @@ TemporalLegEvaluation EvaluateRouteLeg(const FacadeT &facade,
         detail::SetTraversalDuration(
             evaluation.target_phantom, target_traversed_in_reverse, adjusted_target_duration);
 
-        evaluation.arrival_timestamp = AdvanceTimestamp(
-            evaluation.arrival_timestamp,
+        evaluation.arrival_timestamp_ds = AdvanceTemporalClock(
+            evaluation.arrival_timestamp_ds,
             std::max(adjusted_target_duration - adjusted_source_duration, EdgeDuration{0}));
+        evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
         evaluation.used_temporal = geometry_duration.used_temporal;
         return evaluation;
     }
@@ -336,8 +375,8 @@ TemporalLegEvaluation EvaluateRouteLeg(const FacadeT &facade,
 
         const auto geometry_index =
             facade.GetGeometryIndex(evaluation.path_data[group_begin].from_edge_based_node);
-        const auto geometry_duration = GetGeometryDurationAtTimestamp(
-            facade, geometry_index.id, geometry_index.forward, evaluation.arrival_timestamp);
+        const auto geometry_duration = GetGeometryDurationAtClock(
+            facade, geometry_index.id, geometry_index.forward, evaluation.arrival_timestamp_ds);
         const auto static_total =
             GetStaticGeometryDuration(facade, geometry_index.id, geometry_index.forward);
 
@@ -388,16 +427,17 @@ TemporalLegEvaluation EvaluateRouteLeg(const FacadeT &facade,
             target_duration_adjusted = true;
         }
 
-        evaluation.arrival_timestamp =
-            AdvanceTimestamp(evaluation.arrival_timestamp, traversed_duration);
+        evaluation.arrival_timestamp_ds =
+            AdvanceTemporalClock(evaluation.arrival_timestamp_ds, traversed_duration);
+        evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
         evaluation.used_temporal = evaluation.used_temporal || geometry_duration.used_temporal;
         group_begin = group_end;
     }
 
     if (!target_duration_adjusted)
     {
-        const auto geometry_duration = GetGeometryDurationAtTimestamp(
-            facade, target_geometry.id, target_geometry.forward, evaluation.arrival_timestamp);
+        const auto geometry_duration = GetGeometryDurationAtClock(
+            facade, target_geometry.id, target_geometry.forward, evaluation.arrival_timestamp_ds);
         const auto static_total =
             GetStaticGeometryDuration(facade, target_geometry.id, target_geometry.forward);
         const auto adjusted_target_duration = detail::ScaleDurationProportionally(
@@ -405,12 +445,31 @@ TemporalLegEvaluation EvaluateRouteLeg(const FacadeT &facade,
 
         detail::SetTraversalDuration(
             evaluation.target_phantom, target_traversed_in_reverse, adjusted_target_duration);
-        evaluation.arrival_timestamp =
-            AdvanceTimestamp(evaluation.arrival_timestamp, adjusted_target_duration);
+        evaluation.arrival_timestamp_ds =
+            AdvanceTemporalClock(evaluation.arrival_timestamp_ds, adjusted_target_duration);
+        evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
         evaluation.used_temporal = evaluation.used_temporal || geometry_duration.used_temporal;
     }
 
     return evaluation;
+}
+
+template <typename FacadeT>
+TemporalLegEvaluation EvaluateRouteLeg(const FacadeT &facade,
+                                       const std::vector<PathData> &path_data,
+                                       const PhantomNode &source_phantom,
+                                       const PhantomNode &target_phantom,
+                                       const bool source_traversed_in_reverse,
+                                       const bool target_traversed_in_reverse,
+                                       const std::time_t departure_timestamp)
+{
+    return EvaluateRouteLegAtClock(facade,
+                                   path_data,
+                                   source_phantom,
+                                   target_phantom,
+                                   source_traversed_in_reverse,
+                                   target_traversed_in_reverse,
+                                   ToTemporalClock(departure_timestamp));
 }
 
 template <typename FacadeT>
@@ -420,6 +479,7 @@ TemporalPathEvaluation EvaluateGeometryPath(const FacadeT &facade,
 {
     TemporalPathEvaluation evaluation;
     evaluation.arrival_timestamp = departure_timestamp;
+    evaluation.arrival_timestamp_ds = ToTemporalClock(departure_timestamp);
     evaluation.steps.reserve(steps.size());
 
     for (const auto &step : steps)
@@ -428,14 +488,16 @@ TemporalPathEvaluation EvaluateGeometryPath(const FacadeT &facade,
         result.geometry_id = step.geometry_id;
         result.forward = step.forward;
 
-        const auto geometry_duration = GetGeometryDurationAtTimestamp(
-            facade, step.geometry_id, step.forward, evaluation.arrival_timestamp);
+        const auto geometry_duration = GetGeometryDurationAtClock(
+            facade, step.geometry_id, step.forward, evaluation.arrival_timestamp_ds);
         result.week_bucket = geometry_duration.week_bucket;
         result.duration = geometry_duration.duration;
         result.used_temporal = geometry_duration.used_temporal;
 
         evaluation.total_duration += result.duration;
-        evaluation.arrival_timestamp = AdvanceTimestamp(evaluation.arrival_timestamp, result.duration);
+        evaluation.arrival_timestamp_ds =
+            AdvanceTemporalClock(evaluation.arrival_timestamp_ds, result.duration);
+        evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
         evaluation.steps.push_back(result);
     }
 
@@ -449,16 +511,18 @@ TemporalRouteEvaluation EvaluateRoute(const FacadeT &facade,
 {
     TemporalRouteEvaluation evaluation;
     evaluation.arrival_timestamp = departure_timestamp;
+    evaluation.arrival_timestamp_ds = ToTemporalClock(departure_timestamp);
 
     for (auto leg_index : util::irange<std::size_t>(0UL, route.leg_endpoints.size()))
     {
-        const auto leg_evaluation = EvaluateRouteLeg(facade,
-                                                     route.unpacked_path_segments[leg_index],
-                                                     route.leg_endpoints[leg_index].source_phantom,
-                                                     route.leg_endpoints[leg_index].target_phantom,
-                                                     route.source_traversed_in_reverse[leg_index],
-                                                     route.target_traversed_in_reverse[leg_index],
-                                                     evaluation.arrival_timestamp);
+        const auto leg_evaluation =
+            EvaluateRouteLegAtClock(facade,
+                                    route.unpacked_path_segments[leg_index],
+                                    route.leg_endpoints[leg_index].source_phantom,
+                                    route.leg_endpoints[leg_index].target_phantom,
+                                    route.source_traversed_in_reverse[leg_index],
+                                    route.target_traversed_in_reverse[leg_index],
+                                    evaluation.arrival_timestamp_ds);
 
         evaluation.total_duration += detail::GetRouteLegDuration(leg_evaluation.path_data,
                                                                  leg_evaluation.source_phantom,
@@ -466,6 +530,7 @@ TemporalRouteEvaluation EvaluateRoute(const FacadeT &facade,
                                                                  route.target_traversed_in_reverse
                                                                      [leg_index]);
         evaluation.arrival_timestamp = leg_evaluation.arrival_timestamp;
+        evaluation.arrival_timestamp_ds = leg_evaluation.arrival_timestamp_ds;
         evaluation.used_temporal = evaluation.used_temporal || leg_evaluation.used_temporal;
     }
 

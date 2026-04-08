@@ -105,6 +105,8 @@ BOOST_AUTO_TEST_CASE(evaluate_geometry_path_falls_back_to_static_duration)
     BOOST_CHECK_EQUAL(from_alias<std::int32_t>(evaluation.steps[1].duration), 50);
     BOOST_CHECK_EQUAL(from_alias<std::int32_t>(evaluation.total_duration), 100);
     BOOST_CHECK_EQUAL(evaluation.arrival_timestamp, std::time_t{345610});
+    BOOST_CHECK_EQUAL(evaluation.arrival_timestamp_ds,
+                      osrm::engine::temporal::ToTemporalClock(std::time_t{345600}) + 100);
 }
 
 BOOST_AUTO_TEST_CASE(timestamp_to_week_bucket_advances_on_bucket_boundary)
@@ -142,6 +144,8 @@ BOOST_AUTO_TEST_CASE(evaluate_route_accumulates_temporal_leg_durations)
     BOOST_CHECK(evaluation.used_temporal);
     BOOST_CHECK_EQUAL(from_alias<std::int32_t>(evaluation.total_duration), 500);
     BOOST_CHECK_EQUAL(evaluation.arrival_timestamp, std::time_t{345650});
+    BOOST_CHECK_EQUAL(evaluation.arrival_timestamp_ds,
+                      osrm::engine::temporal::ToTemporalClock(std::time_t{345600}) + 500);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
