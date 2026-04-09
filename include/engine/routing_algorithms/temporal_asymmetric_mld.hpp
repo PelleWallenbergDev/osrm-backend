@@ -55,23 +55,12 @@ struct QueueCompare
 
 inline bool IsInvalidDuration(const EdgeDuration duration)
 {
-    return duration == INVALID_EDGE_DURATION;
+    return !engine::temporal::detail::IsFiniteNonNegativeDuration(duration);
 }
 
 inline EdgeDuration SafeDurationAdd(const EdgeDuration lhs, const EdgeDuration rhs)
 {
-    if (IsInvalidDuration(lhs) || IsInvalidDuration(rhs))
-    {
-        return INVALID_EDGE_DURATION;
-    }
-
-    const auto sum = from_alias<std::int64_t>(lhs) + from_alias<std::int64_t>(rhs);
-    if (sum >= from_alias<std::int64_t>(INVALID_EDGE_DURATION))
-    {
-        return INVALID_EDGE_DURATION;
-    }
-
-    return to_alias<EdgeDuration>(sum);
+    return engine::temporal::detail::SafeDurationAdd(lhs, rhs);
 }
 
 inline EdgeDuration TurnPenaltyToDuration(const TurnPenalty penalty)
@@ -83,17 +72,18 @@ template <typename FacadeT>
 EdgeDuration GetNodeLowerBoundDuration(const FacadeT &facade, const NodeID node)
 {
     const auto geometry_index = facade.GetGeometryIndex(node);
+    const auto static_duration = engine::temporal::GetStaticGeometryDuration(
+        facade, geometry_index.id, geometry_index.forward);
     const auto temporal_min = geometry_index.forward
                                   ? facade.GetTemporalForwardMinDuration(geometry_index.id)
                                   : facade.GetTemporalReverseMinDuration(geometry_index.id);
 
-    if (temporal_min != INVALID_EDGE_DURATION)
+    if (engine::temporal::detail::IsPlausibleTemporalDuration(temporal_min, static_duration))
     {
-        return temporal_min;
+        return std::min(temporal_min, static_duration);
     }
 
-    return engine::temporal::GetStaticGeometryDuration(
-        facade, geometry_index.id, geometry_index.forward);
+    return static_duration;
 }
 
 template <typename FacadeT>
@@ -130,18 +120,21 @@ EdgeDuration GetPhantomTraversalLowerBound(const FacadeT &facade,
                                            const DirectedPhantomEndpoint &endpoint)
 {
     const auto geometry_index = facade.GetGeometryIndex(endpoint.node);
+    const auto static_total = engine::temporal::GetStaticGeometryDuration(
+        facade, geometry_index.id, geometry_index.forward);
     auto full_duration = geometry_index.forward
                              ? facade.GetTemporalForwardMinDuration(geometry_index.id)
                              : facade.GetTemporalReverseMinDuration(geometry_index.id);
 
-    if (full_duration == INVALID_EDGE_DURATION)
+    if (engine::temporal::detail::IsPlausibleTemporalDuration(full_duration, static_total))
     {
-        full_duration = engine::temporal::GetStaticGeometryDuration(
-            facade, geometry_index.id, geometry_index.forward);
+        full_duration = std::min(full_duration, static_total);
+    }
+    else
+    {
+        full_duration = static_total;
     }
 
-    const auto static_total = engine::temporal::GetStaticGeometryDuration(
-        facade, geometry_index.id, geometry_index.forward);
     const auto partial_duration =
         engine::temporal::detail::GetTraversalDuration(*endpoint.phantom,
                                                        endpoint.traversed_in_reverse);
@@ -156,7 +149,7 @@ EdgeDuration GetSourceRemainingDurationAtClock(const FacadeT &facade,
 {
     const auto node_duration = GetNodeDurationAtClock(facade, source.node, clock);
     const auto source_offset = GetPhantomTraversalDurationAtClock(facade, source, clock);
-    return std::max(node_duration - source_offset, EdgeDuration{0});
+    return engine::temporal::detail::SafeDurationSubFloorZero(node_duration, source_offset);
 }
 
 template <typename FacadeT>
@@ -165,7 +158,7 @@ EdgeDuration GetSourceRemainingLowerBound(const FacadeT &facade,
 {
     const auto node_duration = GetNodeLowerBoundDuration(facade, source.node);
     const auto source_offset = GetPhantomTraversalLowerBound(facade, source);
-    return std::max(node_duration - source_offset, EdgeDuration{0});
+    return engine::temporal::detail::SafeDurationSubFloorZero(node_duration, source_offset);
 }
 
 template <typename FacadeT>
@@ -176,7 +169,7 @@ EdgeDuration EvaluateLocalPathDuration(const FacadeT &facade,
 {
     const auto source_offset = GetPhantomTraversalDurationAtClock(facade, source, departure_clock);
     const auto target_offset = GetPhantomTraversalDurationAtClock(facade, target, departure_clock);
-    return std::max(target_offset - source_offset, EdgeDuration{0});
+    return engine::temporal::detail::SafeDurationSubFloorZero(target_offset, source_offset);
 }
 
 template <typename FacadeT>
@@ -263,7 +256,11 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
     const std::optional<EdgeDuration> initial_upper_bound = std::nullopt)
 {
     TemporalAsymmetricPath best_path;
-    auto best_upper_bound = initial_upper_bound.value_or(INVALID_EDGE_DURATION);
+    auto best_upper_bound =
+        initial_upper_bound &&
+                engine::temporal::detail::IsFiniteNonNegativeDuration(*initial_upper_bound)
+            ? *initial_upper_bound
+            : INVALID_EDGE_DURATION;
     const auto departure_clock = engine::temporal::ToTemporalClock(departure_timestamp);
 
     if (source.node == target.node)
@@ -309,16 +306,19 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
 
         if (current.node == source.node && current.cost == EdgeDuration{0})
         {
+            const auto node_lower_bound = GetNodeLowerBoundDuration(facade, source.node);
             lower_bound = GetSourceRemainingLowerBound(facade, source);
             lower_bound = SafeDurationAdd(
                 lower_bound,
-                std::max(reverse_lower_bounds[source.node] -
-                             GetNodeLowerBoundDuration(facade, source.node),
-                         EdgeDuration{0}));
+                engine::temporal::detail::SafeDurationSubFloorZero(
+                    reverse_lower_bounds[source.node], node_lower_bound));
         }
 
+        const auto optimistic_total = SafeDurationAdd(current.cost, lower_bound);
         if (best_upper_bound != INVALID_EDGE_DURATION &&
-            SafeDurationAdd(current.cost, lower_bound) >= best_upper_bound)
+            optimistic_total != INVALID_EDGE_DURATION &&
+            (best_path.is_valid() ? optimistic_total >= best_upper_bound
+                                  : optimistic_total > best_upper_bound))
         {
             continue;
         }
@@ -333,7 +333,8 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
             const auto candidate_total = SafeDurationAdd(current.cost, target_duration);
 
             if (candidate_total != INVALID_EDGE_DURATION &&
-                (best_upper_bound == INVALID_EDGE_DURATION || candidate_total < best_upper_bound))
+                (!best_path.is_valid() || best_upper_bound == INVALID_EDGE_DURATION ||
+                 candidate_total < best_upper_bound))
             {
                 best_upper_bound = candidate_total;
 

@@ -128,7 +128,15 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
             {
                 const auto evaluation =
                     engine::temporal::EvaluateRoute(facade, static_route, departure_timestamp);
-                initial_upper_bound = evaluation.total_duration;
+                const auto static_duration = static_route.duration();
+                if (engine::temporal::detail::IsFiniteNonNegativeDuration(
+                        evaluation.total_duration) &&
+                    (!evaluation.used_temporal ||
+                     engine::temporal::detail::IsPlausibleTemporalDuration(
+                         evaluation.total_duration, static_duration)))
+                {
+                    initial_upper_bound = evaluation.total_duration;
+                }
             }
 
             const auto candidate = mld::temporal::Search(facade,

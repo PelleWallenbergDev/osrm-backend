@@ -176,4 +176,94 @@ BOOST_AUTO_TEST_CASE(search_handles_same_geometry_local_paths)
     BOOST_CHECK_EQUAL(result.nodes[0], 0);
 }
 
+BOOST_AUTO_TEST_CASE(search_keeps_equal_initial_upper_bound_as_valid_solution)
+{
+    TemporalSearchFacade facade;
+    facade.static_forward_durations = {
+        {SegmentDuration{10}}, {SegmentDuration{10}}, {SegmentDuration{10}}};
+    facade.forward_temporal = {};
+    facade.forward_temporal_min = {EdgeDuration{10}, EdgeDuration{10}, EdgeDuration{10}};
+    facade.turn_penalties = {TurnPenalty{0}, TurnPenalty{0}};
+    facade.edges = {{1, {0}, true}, {2, {1}, true}};
+    facade.edge_offsets = {0, 1, 2, 2};
+
+    const auto source_phantom = MakeTemporalPhantom(0, EdgeDuration{0});
+    const auto target_phantom = MakeTemporalPhantom(2, EdgeDuration{10});
+
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 2, false};
+
+    const auto result = engine::routing_algorithms::mld::temporal::Search(
+        facade, source, target, std::time_t{1735689600}, EdgeDuration{30});
+
+    BOOST_REQUIRE(result.is_valid());
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(result.total_duration), 30);
+    BOOST_REQUIRE_EQUAL(result.nodes.size(), 3UL);
+    BOOST_CHECK_EQUAL(result.nodes[0], 0);
+    BOOST_CHECK_EQUAL(result.nodes[1], 1);
+    BOOST_CHECK_EQUAL(result.nodes[2], 2);
+}
+
+BOOST_AUTO_TEST_CASE(search_ignores_negative_initial_upper_bound)
+{
+    TemporalSearchFacade facade;
+    facade.static_forward_durations = {
+        {SegmentDuration{10}}, {SegmentDuration{10}}, {SegmentDuration{10}}};
+    facade.forward_temporal = {};
+    facade.forward_temporal_min = {EdgeDuration{10}, EdgeDuration{10}, EdgeDuration{10}};
+    facade.turn_penalties = {TurnPenalty{0}, TurnPenalty{0}};
+    facade.edges = {{1, {0}, true}, {2, {1}, true}};
+    facade.edge_offsets = {0, 1, 2, 2};
+
+    const auto source_phantom = MakeTemporalPhantom(0, EdgeDuration{0});
+    const auto target_phantom = MakeTemporalPhantom(2, EdgeDuration{10});
+
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 2, false};
+
+    const auto result = engine::routing_algorithms::mld::temporal::Search(
+        facade, source, target, std::time_t{1735689600}, EdgeDuration{-1});
+
+    BOOST_REQUIRE(result.is_valid());
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(result.total_duration), 30);
+    BOOST_REQUIRE_EQUAL(result.nodes.size(), 3UL);
+    BOOST_CHECK_EQUAL(result.nodes[0], 0);
+    BOOST_CHECK_EQUAL(result.nodes[1], 1);
+    BOOST_CHECK_EQUAL(result.nodes[2], 2);
+}
+
+BOOST_AUTO_TEST_CASE(search_keeps_reverse_lower_bound_no_greater_than_static)
+{
+    TemporalSearchFacade facade;
+    facade.static_forward_durations = {
+        {SegmentDuration{10}}, {SegmentDuration{10}}, {SegmentDuration{10}}};
+    facade.forward_temporal = {};
+    facade.forward_temporal_min = {EdgeDuration{1000}, EdgeDuration{1000}, EdgeDuration{1000}};
+    facade.turn_penalties = {TurnPenalty{0}, TurnPenalty{0}};
+    facade.edges = {{1, {0}, true}, {2, {1}, true}};
+    facade.edge_offsets = {0, 1, 2, 2};
+
+    const auto source_phantom = MakeTemporalPhantom(0, EdgeDuration{0});
+    const auto target_phantom = MakeTemporalPhantom(2, EdgeDuration{10});
+
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 2, false};
+
+    const auto result = engine::routing_algorithms::mld::temporal::Search(
+        facade, source, target, std::time_t{1735689600}, EdgeDuration{30});
+
+    BOOST_REQUIRE(result.is_valid());
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(result.total_duration), 30);
+    BOOST_REQUIRE_EQUAL(result.nodes.size(), 3UL);
+    BOOST_CHECK_EQUAL(result.nodes[0], 0);
+    BOOST_CHECK_EQUAL(result.nodes[1], 1);
+    BOOST_CHECK_EQUAL(result.nodes[2], 2);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -3,6 +3,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <vector>
 
@@ -146,6 +147,51 @@ BOOST_AUTO_TEST_CASE(evaluate_route_accumulates_temporal_leg_durations)
     BOOST_CHECK_EQUAL(evaluation.arrival_timestamp, std::time_t{345650});
     BOOST_CHECK_EQUAL(evaluation.arrival_timestamp_ds,
                       osrm::engine::temporal::ToTemporalClock(std::time_t{345600}) + 500);
+}
+
+BOOST_AUTO_TEST_CASE(implausible_temporal_geometry_duration_falls_back_to_static)
+{
+    FakeTemporalFacade facade;
+    facade.static_forward_durations = {{7, {SegmentDuration{40}}}};
+    facade.forward_temporal = {{{7, 0},
+                                EdgeDuration{
+                                    std::numeric_limits<EdgeDuration::value_type>::max() - 1}}};
+
+    const std::vector<osrm::engine::temporal::TemporalGeometryStep> steps = {{7, true}};
+    const auto evaluation =
+        osrm::engine::temporal::EvaluateGeometryPath(facade, steps, std::time_t{345600});
+
+    BOOST_REQUIRE_EQUAL(evaluation.steps.size(), 1);
+    BOOST_CHECK(!evaluation.steps[0].used_temporal);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(evaluation.steps[0].duration), 40);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(evaluation.total_duration), 40);
+}
+
+BOOST_AUTO_TEST_CASE(evaluate_route_does_not_emit_negative_duration_for_implausible_temporal_value)
+{
+    FakeTemporalFacade facade;
+    facade.static_forward_durations = {{7, {SegmentDuration{60}, SegmentDuration{40}}}};
+    facade.forward_temporal = {{{7, 0},
+                                EdgeDuration{
+                                    std::numeric_limits<EdgeDuration::value_type>::max() - 1}}};
+
+    const auto route = MakeRoute(7, 11, EdgeDuration{40});
+    const auto evaluation = osrm::engine::temporal::EvaluateRoute(facade, route, std::time_t{345600});
+
+    BOOST_CHECK(!evaluation.used_temporal);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(evaluation.total_duration), 100);
+    BOOST_CHECK_EQUAL(evaluation.arrival_timestamp_ds,
+                      osrm::engine::temporal::ToTemporalClock(std::time_t{345600}) + 100);
+}
+
+BOOST_AUTO_TEST_CASE(proportional_scaling_rejects_overflow)
+{
+    const auto scaled = osrm::engine::temporal::detail::ScaleDurationProportionally(
+        EdgeDuration{100},
+        EdgeDuration{1},
+        EdgeDuration{std::numeric_limits<EdgeDuration::value_type>::max() - 1});
+
+    BOOST_CHECK_EQUAL(scaled, INVALID_EDGE_DURATION);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

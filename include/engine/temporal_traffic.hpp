@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <ctime>
+#include <limits>
 #include <numeric>
 #include <vector>
 
@@ -80,33 +81,131 @@ inline std::tm utcTime(const std::time_t timestamp)
     return result;
 }
 
+inline std::int64_t MaxFiniteDurationRaw()
+{
+    return from_alias<std::int64_t>(INVALID_EDGE_DURATION) - 1;
+}
+
+inline bool IsFiniteDuration(const EdgeDuration duration)
+{
+    return from_alias<std::int64_t>(duration) != from_alias<std::int64_t>(INVALID_EDGE_DURATION);
+}
+
+inline bool IsFiniteNonNegativeDuration(const EdgeDuration duration)
+{
+    const auto raw = from_alias<std::int64_t>(duration);
+    return raw >= 0 && raw <= MaxFiniteDurationRaw();
+}
+
+inline bool IsFinitePositiveDuration(const EdgeDuration duration)
+{
+    const auto raw = from_alias<std::int64_t>(duration);
+    return raw > 0 && raw <= MaxFiniteDurationRaw();
+}
+
+inline EdgeDuration DurationOrInvalid(const std::int64_t raw)
+{
+    if (raw < 0 || raw > MaxFiniteDurationRaw())
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+    return to_alias<EdgeDuration>(raw);
+}
+
+inline EdgeDuration SafeDurationAdd(const EdgeDuration lhs, const EdgeDuration rhs)
+{
+    const auto lhs_raw = from_alias<std::int64_t>(lhs);
+    const auto rhs_raw = from_alias<std::int64_t>(rhs);
+    if (lhs_raw < 0 || !IsFiniteDuration(lhs) || !IsFiniteDuration(rhs))
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+    return DurationOrInvalid(lhs_raw + rhs_raw);
+}
+
+inline EdgeDuration SafeDurationSubFloorZero(const EdgeDuration lhs, const EdgeDuration rhs)
+{
+    if (!IsFiniteNonNegativeDuration(lhs) || !IsFiniteNonNegativeDuration(rhs))
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+    const auto lhs_raw = from_alias<std::int64_t>(lhs);
+    const auto rhs_raw = from_alias<std::int64_t>(rhs);
+    return to_alias<EdgeDuration>(std::max<std::int64_t>(0, lhs_raw - rhs_raw));
+}
+
+inline EdgeDuration TemporalPlausibilityCeiling(const EdgeDuration static_duration)
+{
+    if (!IsFiniteNonNegativeDuration(static_duration))
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+    constexpr std::int64_t multiplier = 20;
+    constexpr std::int64_t slack_ds = 6000;
+
+    const auto static_raw = from_alias<std::int64_t>(static_duration);
+    const auto max_raw = MaxFiniteDurationRaw();
+    const auto multiplied =
+        static_raw > max_raw / multiplier ? max_raw : static_raw * multiplier;
+    const auto with_slack = static_raw > max_raw - slack_ds ? max_raw : static_raw + slack_ds;
+    return to_alias<EdgeDuration>(std::max(multiplied, with_slack));
+}
+
+inline bool IsPlausibleTemporalDuration(const EdgeDuration temporal_duration,
+                                        const EdgeDuration static_duration)
+{
+    if (!IsFinitePositiveDuration(temporal_duration) ||
+        !IsFiniteNonNegativeDuration(static_duration))
+    {
+        return false;
+    }
+
+    return temporal_duration <= TemporalPlausibilityCeiling(static_duration);
+}
+
 inline EdgeDuration ScaleDurationProportionally(const EdgeDuration value,
                                                 const EdgeDuration static_total,
                                                 const EdgeDuration scaled_total)
 {
+    if (!IsFiniteNonNegativeDuration(value) || !IsFinitePositiveDuration(static_total) ||
+        !IsFiniteNonNegativeDuration(scaled_total))
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
     const auto static_total_raw = from_alias<std::int64_t>(static_total);
-    if (static_total_raw <= 0)
+    const auto value_raw = from_alias<std::int64_t>(value);
+    const auto scaled_total_raw = from_alias<std::int64_t>(scaled_total);
+    if (value_raw == 0 || scaled_total_raw == 0)
     {
         return EdgeDuration{0};
     }
 
-    const auto value_raw = from_alias<std::int64_t>(value);
-    const auto scaled_total_raw = from_alias<std::int64_t>(scaled_total);
-    return to_alias<EdgeDuration>(
-        std::llround(static_cast<long double>(value_raw) * scaled_total_raw / static_total_raw));
+    const auto scaled_value =
+        std::llround(static_cast<long double>(value_raw) * scaled_total_raw / static_total_raw);
+    return DurationOrInvalid(scaled_value);
 }
 
 inline std::vector<EdgeDuration> ScaleDurationsToTotal(const std::vector<EdgeDuration> &durations,
                                                        const EdgeDuration scaled_total)
 {
-    std::vector<EdgeDuration> scaled(durations.size(), EdgeDuration{0});
     if (durations.empty())
     {
-        return scaled;
+        return {};
     }
 
     const auto total_raw = from_alias<std::int64_t>(scaled_total);
-    if (total_raw <= 0)
+    if (!IsFiniteNonNegativeDuration(scaled_total))
+    {
+        return {};
+    }
+
+    std::vector<EdgeDuration> scaled(durations.size(), EdgeDuration{0});
+    if (total_raw == 0)
     {
         return scaled;
     }
@@ -116,11 +215,17 @@ inline std::vector<EdgeDuration> ScaleDurationsToTotal(const std::vector<EdgeDur
                         durations.end(),
                         std::int64_t{0},
                         [](const std::int64_t sum, const EdgeDuration duration)
-                        { return sum + from_alias<std::int64_t>(duration); });
+                        {
+                            if (sum < 0 || !IsFiniteNonNegativeDuration(duration))
+                            {
+                                return std::int64_t{-1};
+                            }
+                            return sum + from_alias<std::int64_t>(duration);
+                        });
 
     if (static_total_raw <= 0)
     {
-        return scaled;
+        return {};
     }
 
     struct FractionalPart
@@ -138,6 +243,10 @@ inline std::vector<EdgeDuration> ScaleDurationsToTotal(const std::vector<EdgeDur
         const auto duration_raw = from_alias<std::int64_t>(durations[index]);
         const auto exact = static_cast<long double>(duration_raw) * total_raw / static_total_raw;
         const auto base = static_cast<std::int64_t>(std::floor(exact));
+        if (base < 0 || base > MaxFiniteDurationRaw())
+        {
+            return {};
+        }
         scaled[index] = to_alias<EdgeDuration>(base);
         assigned_total += base;
         fractional_parts.push_back({index, exact - base});
@@ -187,20 +296,28 @@ inline EdgeDuration GetRouteLegDuration(const std::vector<PathData> &route_data,
                                         const PhantomNode &target_phantom,
                                         const bool target_traversed_in_reverse)
 {
-    auto duration = std::accumulate(route_data.begin(),
-                                    route_data.end(),
-                                    EdgeDuration{0},
-                                    [](const EdgeDuration sum, const PathData &data)
-                                    { return sum + data.duration_until_turn; });
+    auto duration = EdgeDuration{0};
+    for (const auto &data : route_data)
+    {
+        duration = SafeDurationAdd(duration, data.duration_until_turn);
+        if (duration == INVALID_EDGE_DURATION)
+        {
+            return INVALID_EDGE_DURATION;
+        }
+    }
 
-    duration += detail::GetTraversalDuration(target_phantom, target_traversed_in_reverse);
+    duration = SafeDurationAdd(duration,
+                               detail::GetTraversalDuration(target_phantom,
+                                                            target_traversed_in_reverse));
+    if (duration == INVALID_EDGE_DURATION)
+    {
+        return INVALID_EDGE_DURATION;
+    }
 
     if (route_data.empty())
     {
-        duration = std::max(duration -
-                                detail::GetTraversalDuration(source_phantom,
-                                                             target_traversed_in_reverse),
-                            EdgeDuration{0});
+        duration = SafeDurationSubFloorZero(
+            duration, detail::GetTraversalDuration(source_phantom, target_traversed_in_reverse));
     }
 
     return duration;
@@ -292,8 +409,11 @@ TemporalGeometryDuration GetGeometryDurationAtClock(const FacadeT &facade,
 
     if (temporal_duration != INVALID_EDGE_DURATION)
     {
-        result.duration = temporal_duration;
-        result.used_temporal = true;
+        if (detail::IsPlausibleTemporalDuration(temporal_duration, result.duration))
+        {
+            result.duration = temporal_duration;
+            result.used_temporal = true;
+        }
     }
 
     return result;
@@ -349,6 +469,20 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
         const auto adjusted_target_duration = detail::ScaleDurationProportionally(
             static_target_duration, static_total, geometry_duration.duration);
 
+        if (adjusted_source_duration == INVALID_EDGE_DURATION ||
+            adjusted_target_duration == INVALID_EDGE_DURATION)
+        {
+            const auto fallback_duration = detail::SafeDurationSubFloorZero(
+                static_target_duration, static_source_duration);
+            if (fallback_duration != INVALID_EDGE_DURATION)
+            {
+                evaluation.arrival_timestamp_ds =
+                    AdvanceTemporalClock(evaluation.arrival_timestamp_ds, fallback_duration);
+                evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
+            }
+            return evaluation;
+        }
+
         detail::SetTraversalDuration(
             evaluation.source_phantom, source_traversed_in_reverse, adjusted_source_duration);
         detail::SetTraversalDuration(
@@ -356,7 +490,8 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
 
         evaluation.arrival_timestamp_ds = AdvanceTemporalClock(
             evaluation.arrival_timestamp_ds,
-            std::max(adjusted_target_duration - adjusted_source_duration, EdgeDuration{0}));
+            detail::SafeDurationSubFloorZero(adjusted_target_duration,
+                                             adjusted_source_duration));
         evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
         evaluation.used_temporal = geometry_duration.used_temporal;
         return evaluation;
@@ -400,22 +535,52 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
         }
 
         const auto static_subset_total =
-            std::accumulate(static_parts.begin(), static_parts.end(), EdgeDuration{0});
-        const auto scaled_subset_total = geometry_duration.used_temporal
-                                             ? detail::ScaleDurationProportionally(
-                                                   static_subset_total,
-                                                   static_total,
-                                                   geometry_duration.duration)
-                                             : static_subset_total;
-        const auto scaled_parts = detail::ScaleDurationsToTotal(static_parts, scaled_subset_total);
+            std::accumulate(static_parts.begin(),
+                            static_parts.end(),
+                            EdgeDuration{0},
+                            [](const EdgeDuration sum, const EdgeDuration duration)
+                            { return detail::SafeDurationAdd(sum, duration); });
+        auto scaled_subset_total = static_subset_total;
+        auto group_uses_temporal = geometry_duration.used_temporal;
+        if (group_uses_temporal)
+        {
+            scaled_subset_total = detail::ScaleDurationProportionally(
+                static_subset_total, static_total, geometry_duration.duration);
+            if (scaled_subset_total == INVALID_EDGE_DURATION)
+            {
+                scaled_subset_total = static_subset_total;
+                group_uses_temporal = false;
+            }
+        }
+
+        auto scaled_parts = detail::ScaleDurationsToTotal(static_parts, scaled_subset_total);
+        if (scaled_parts.size() != static_parts.size())
+        {
+            scaled_parts = static_parts;
+            group_uses_temporal = false;
+        }
 
         EdgeDuration traversed_duration = EdgeDuration{0};
         for (auto index = group_begin; index < group_end; ++index)
         {
             const auto scaled_segment_duration = scaled_parts[index - group_begin];
-            evaluation.path_data[index].duration_until_turn =
-                scaled_segment_duration + evaluation.path_data[index].duration_of_turn;
-            traversed_duration += evaluation.path_data[index].duration_until_turn;
+            auto duration_until_turn =
+                detail::SafeDurationAdd(scaled_segment_duration,
+                                        evaluation.path_data[index].duration_of_turn);
+            if (duration_until_turn == INVALID_EDGE_DURATION)
+            {
+                duration_until_turn = evaluation.path_data[index].duration_until_turn;
+                group_uses_temporal = false;
+            }
+            evaluation.path_data[index].duration_until_turn = duration_until_turn;
+            traversed_duration =
+                detail::SafeDurationAdd(traversed_duration, duration_until_turn);
+            if (traversed_duration == INVALID_EDGE_DURATION)
+            {
+                traversed_duration = EdgeDuration{0};
+                group_uses_temporal = false;
+                break;
+            }
         }
 
         if (include_target_duration)
@@ -423,14 +588,19 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
             const auto scaled_target_duration = scaled_parts.back();
             detail::SetTraversalDuration(
                 evaluation.target_phantom, target_traversed_in_reverse, scaled_target_duration);
-            traversed_duration += scaled_target_duration;
+            traversed_duration = detail::SafeDurationAdd(traversed_duration, scaled_target_duration);
+            if (traversed_duration == INVALID_EDGE_DURATION)
+            {
+                traversed_duration = EdgeDuration{0};
+                group_uses_temporal = false;
+            }
             target_duration_adjusted = true;
         }
 
         evaluation.arrival_timestamp_ds =
             AdvanceTemporalClock(evaluation.arrival_timestamp_ds, traversed_duration);
         evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
-        evaluation.used_temporal = evaluation.used_temporal || geometry_duration.used_temporal;
+        evaluation.used_temporal = evaluation.used_temporal || group_uses_temporal;
         group_begin = group_end;
     }
 
@@ -442,13 +612,18 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
             GetStaticGeometryDuration(facade, target_geometry.id, target_geometry.forward);
         const auto adjusted_target_duration = detail::ScaleDurationProportionally(
             static_target_duration, static_total, geometry_duration.duration);
+        const auto target_duration =
+            adjusted_target_duration == INVALID_EDGE_DURATION ? static_target_duration
+                                                              : adjusted_target_duration;
 
         detail::SetTraversalDuration(
-            evaluation.target_phantom, target_traversed_in_reverse, adjusted_target_duration);
+            evaluation.target_phantom, target_traversed_in_reverse, target_duration);
         evaluation.arrival_timestamp_ds =
-            AdvanceTemporalClock(evaluation.arrival_timestamp_ds, adjusted_target_duration);
+            AdvanceTemporalClock(evaluation.arrival_timestamp_ds, target_duration);
         evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
-        evaluation.used_temporal = evaluation.used_temporal || geometry_duration.used_temporal;
+        evaluation.used_temporal =
+            evaluation.used_temporal ||
+            (geometry_duration.used_temporal && adjusted_target_duration != INVALID_EDGE_DURATION);
     }
 
     return evaluation;
@@ -494,7 +669,12 @@ TemporalPathEvaluation EvaluateGeometryPath(const FacadeT &facade,
         result.duration = geometry_duration.duration;
         result.used_temporal = geometry_duration.used_temporal;
 
-        evaluation.total_duration += result.duration;
+        evaluation.total_duration = detail::SafeDurationAdd(evaluation.total_duration,
+                                                            result.duration);
+        if (evaluation.total_duration == INVALID_EDGE_DURATION)
+        {
+            return evaluation;
+        }
         evaluation.arrival_timestamp_ds =
             AdvanceTemporalClock(evaluation.arrival_timestamp_ds, result.duration);
         evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
@@ -524,11 +704,18 @@ TemporalRouteEvaluation EvaluateRoute(const FacadeT &facade,
                                     route.target_traversed_in_reverse[leg_index],
                                     evaluation.arrival_timestamp_ds);
 
-        evaluation.total_duration += detail::GetRouteLegDuration(leg_evaluation.path_data,
-                                                                 leg_evaluation.source_phantom,
-                                                                 leg_evaluation.target_phantom,
-                                                                 route.target_traversed_in_reverse
-                                                                     [leg_index]);
+        const auto leg_duration =
+            detail::GetRouteLegDuration(leg_evaluation.path_data,
+                                        leg_evaluation.source_phantom,
+                                        leg_evaluation.target_phantom,
+                                        route.target_traversed_in_reverse[leg_index]);
+        evaluation.total_duration = detail::SafeDurationAdd(evaluation.total_duration,
+                                                            leg_duration);
+        if (evaluation.total_duration == INVALID_EDGE_DURATION)
+        {
+            evaluation.used_temporal = false;
+            return evaluation;
+        }
         evaluation.arrival_timestamp = leg_evaluation.arrival_timestamp;
         evaluation.arrival_timestamp_ds = leg_evaluation.arrival_timestamp_ds;
         evaluation.used_temporal = evaluation.used_temporal || leg_evaluation.used_temporal;
@@ -563,7 +750,10 @@ bool RerankRoutesByTemporalDuration(const FacadeT &facade,
         }
 
         const auto evaluation = EvaluateRoute(facade, route, departure_timestamp);
-        scores.push_back({index, evaluation.total_duration, true, evaluation.used_temporal});
+        const auto valid_duration =
+            detail::IsFiniteNonNegativeDuration(evaluation.total_duration);
+        scores.push_back(
+            {index, evaluation.total_duration, valid_duration, valid_duration && evaluation.used_temporal});
     }
 
     const auto any_temporal = std::any_of(
