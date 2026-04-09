@@ -100,9 +100,13 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
     const auto target_endpoints =
         mld::temporal::EnumerateTargetEndpoints(endpoint_candidates.target_phantoms);
 
+    TemporalAsymmetricSearchDiagnostics diagnostics;
+
     if (source_endpoints.empty() || target_endpoints.empty())
     {
-        return {};
+        InternalRouteResult route;
+        route.temporal_asymmetric_debug = diagnostics;
+        return route;
     }
 
     const auto incoming_edges = mld::temporal::BuildIncomingEdgeIndex(facade);
@@ -115,6 +119,8 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
     {
         for (const auto &target : target_endpoints)
         {
+            ++diagnostics.endpoint_pairs_tried;
+
             PhantomNodeCandidates source_candidates{*source.phantom};
             PhantomNodeCandidates target_candidates{*target.phantom};
             const PhantomEndpointCandidates specific_candidates{source_candidates, target_candidates};
@@ -136,6 +142,7 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
                          evaluation.total_duration, static_duration)))
                 {
                     initial_upper_bound = evaluation.total_duration;
+                    ++diagnostics.endpoint_pairs_with_static_upper_bound;
                 }
             }
 
@@ -144,11 +151,13 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
                                                          target,
                                                          departure_timestamp,
                                                          incoming_edges,
-                                                         initial_upper_bound);
+                                                         initial_upper_bound,
+                                                         &diagnostics);
 
             if (!candidate.is_valid() ||
                 (best_path.is_valid() && candidate.total_duration >= best_path.total_duration))
             {
+                ++diagnostics.best_candidate_rejected;
                 continue;
             }
 
@@ -160,7 +169,9 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
 
     if (!best_path.is_valid() || best_source_phantom == nullptr || best_target_phantom == nullptr)
     {
-        return {};
+        InternalRouteResult route;
+        route.temporal_asymmetric_debug = diagnostics;
+        return route;
     }
 
     std::vector<EdgeID> unpacked_edges;
@@ -177,11 +188,13 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
     PhantomNodeCandidates target_candidates{*best_target_phantom};
     const PhantomEndpointCandidates best_candidates{source_candidates, target_candidates};
 
-    return extractRoute(facade,
-                        alias_cast<EdgeWeight>(best_path.total_duration),
-                        best_candidates,
-                        best_path.nodes,
-                        unpacked_edges);
+    auto route = extractRoute(facade,
+                              alias_cast<EdgeWeight>(best_path.total_duration),
+                              best_candidates,
+                              best_path.nodes,
+                              unpacked_edges);
+    route.temporal_asymmetric_debug = diagnostics;
+    return route;
 }
 
 } // namespace osrm::engine::routing_algorithms

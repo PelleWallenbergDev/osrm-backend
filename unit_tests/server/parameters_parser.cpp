@@ -98,6 +98,7 @@ BOOST_AUTO_TEST_CASE(invalid_route_urls)
         testInvalidOptions<RouteParameters>("1,2;3,4?annotations=&overview=simplified"), 20UL);
     BOOST_CHECK_EQUAL(testInvalidOptions<RouteParameters>("1,2;3,4?depart_at=foo"), 18UL);
     BOOST_CHECK_EQUAL(testInvalidOptions<RouteParameters>("1,2;3,4?temporal_mode=foo"), 22UL);
+    BOOST_CHECK_EQUAL(testInvalidOptions<RouteParameters>("1,2;3,4?temporal_debug=foo"), 23UL);
 }
 
 BOOST_AUTO_TEST_CASE(invalid_table_urls)
@@ -566,6 +567,20 @@ BOOST_AUTO_TEST_CASE(valid_route_urls)
     BOOST_CHECK_EQUAL(*reference_23.departure_timestamp, *result_23->departure_timestamp);
     BOOST_CHECK_EQUAL(reference_23.temporal_routing_mode, result_23->temporal_routing_mode);
     CHECK_EQUAL_RANGE(reference_23.coordinates, result_23->coordinates);
+
+    RouteParameters reference_24{};
+    reference_24.coordinates = coords_1;
+    reference_24.departure_timestamp = std::time_t{1735689600};
+    reference_24.temporal_routing_mode = RouteParameters::TemporalRoutingMode::Asymmetric;
+    reference_24.temporal_debug = true;
+    auto result_24 = parseParameters<RouteParameters>(
+        "1,2;3,4?depart_at=1735689600&temporal_mode=asymmetric&temporal_debug=true");
+    BOOST_CHECK(result_24);
+    BOOST_REQUIRE(result_24->departure_timestamp.has_value());
+    BOOST_CHECK_EQUAL(*reference_24.departure_timestamp, *result_24->departure_timestamp);
+    BOOST_CHECK_EQUAL(reference_24.temporal_routing_mode, result_24->temporal_routing_mode);
+    BOOST_CHECK_EQUAL(reference_24.temporal_debug, result_24->temporal_debug);
+    CHECK_EQUAL_RANGE(reference_24.coordinates, result_24->coordinates);
 }
 
 BOOST_AUTO_TEST_CASE(valid_table_urls)

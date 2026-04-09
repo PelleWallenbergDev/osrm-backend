@@ -183,6 +183,7 @@ struct RouteParameters : public BaseParameters
     std::vector<std::size_t> waypoints;
     std::optional<std::time_t> departure_timestamp;
     TemporalRoutingMode temporal_routing_mode = TemporalRoutingMode::None;
+    bool temporal_debug = false;
 
     bool IsValid() const
     {

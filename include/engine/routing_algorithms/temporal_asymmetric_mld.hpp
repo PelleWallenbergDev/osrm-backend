@@ -2,6 +2,7 @@
 #define OSRM_ENGINE_ROUTING_ALGORITHMS_TEMPORAL_ASYMMETRIC_MLD_HPP
 
 #include "engine/phantom_node.hpp"
+#include "engine/internal_route_result.hpp"
 #include "engine/temporal_traffic.hpp"
 
 #include "util/typedefs.hpp"
@@ -253,14 +254,15 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
     const DirectedPhantomEndpoint &target,
     const std::time_t departure_timestamp,
     const std::vector<std::vector<IncomingEdge>> &incoming_edges,
-    const std::optional<EdgeDuration> initial_upper_bound = std::nullopt)
+    const std::optional<EdgeDuration> initial_upper_bound = std::nullopt,
+    TemporalAsymmetricSearchDiagnostics *diagnostics = nullptr)
 {
     TemporalAsymmetricPath best_path;
-    auto best_upper_bound =
+    const auto has_initial_upper_bound =
         initial_upper_bound &&
-                engine::temporal::detail::IsFiniteNonNegativeDuration(*initial_upper_bound)
-            ? *initial_upper_bound
-            : INVALID_EDGE_DURATION;
+        engine::temporal::detail::IsFiniteNonNegativeDuration(*initial_upper_bound);
+    auto best_upper_bound =
+        has_initial_upper_bound ? *initial_upper_bound : INVALID_EDGE_DURATION;
     const auto departure_clock = engine::temporal::ToTemporalClock(departure_timestamp);
 
     if (source.node == target.node)
@@ -277,6 +279,10 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
     if (source.node >= reverse_lower_bounds.size() ||
         reverse_lower_bounds[source.node] == INVALID_EDGE_DURATION)
     {
+        if (diagnostics)
+        {
+            ++diagnostics->reverse_lower_bound_source_invalid;
+        }
         return best_path;
     }
 
@@ -320,12 +326,42 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
             (best_path.is_valid() ? optimistic_total >= best_upper_bound
                                   : optimistic_total > best_upper_bound))
         {
+            if (diagnostics)
+            {
+                if (!best_path.is_valid() && has_initial_upper_bound)
+                {
+                    ++diagnostics->pruned_by_initial_upper_bound;
+                    const auto prune_margin =
+                        std::max<std::int64_t>(0,
+                                               from_alias<std::int64_t>(optimistic_total) -
+                                                   from_alias<std::int64_t>(best_upper_bound));
+                    diagnostics->RecordInitialUpperBoundPruneMargin(prune_margin);
+                    if (current.node == source.node && current.cost == EdgeDuration{0})
+                    {
+                        ++diagnostics->source_first_pop_pruned_by_initial_upper_bound;
+                    }
+                }
+                else
+                {
+                    ++diagnostics->pruned_by_best_upper_bound;
+                }
+            }
             continue;
+        }
+
+        if (diagnostics)
+        {
+            ++diagnostics->expanded_nodes;
         }
 
         if (current.node == target.node &&
             (current.cost > EdgeDuration{0} || source.node != target.node))
         {
+            if (diagnostics)
+            {
+                ++diagnostics->target_reached;
+            }
+
             const auto arrival_clock =
                 engine::temporal::AdvanceTemporalClock(departure_clock, current.cost);
             const auto target_duration =
@@ -353,6 +389,10 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
                 best_path.total_duration = candidate_total;
                 best_path.nodes = std::move(nodes);
             }
+            else if (diagnostics)
+            {
+                ++diagnostics->best_candidate_rejected;
+            }
         }
 
         const auto current_clock =
@@ -378,22 +418,39 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
             const auto &edge_data = facade.GetEdgeData(edge);
             const auto turn_penalty =
                 TurnPenaltyToDuration(facade.GetDurationPenaltyForEdgeID(edge_data.turn_id));
+            if (diagnostics)
+            {
+                ++diagnostics->relaxation_attempts;
+            }
             const auto edge_cost = SafeDurationAdd(node_duration, turn_penalty);
             const auto candidate_cost = SafeDurationAdd(current.cost, edge_cost);
 
-            if (candidate_cost == INVALID_EDGE_DURATION)
+            if (edge_cost == INVALID_EDGE_DURATION || candidate_cost == INVALID_EDGE_DURATION)
             {
+                if (diagnostics)
+                {
+                    ++diagnostics->invalid_duration_relaxations;
+                }
                 continue;
             }
 
             if (settled_costs[target_node] == INVALID_EDGE_DURATION ||
                 candidate_cost < settled_costs[target_node])
             {
+                if (diagnostics)
+                {
+                    ++diagnostics->relaxation_improvements;
+                }
                 settled_costs[target_node] = candidate_cost;
                 parents[target_node] = current.node;
                 queue.push({candidate_cost, target_node});
             }
         }
+    }
+
+    if (!best_path.is_valid() && diagnostics)
+    {
+        ++diagnostics->queue_exhausted_without_target;
     }
 
     return best_path;
@@ -454,11 +511,18 @@ TemporalAsymmetricPath Search(const FacadeT &facade,
                               const DirectedPhantomEndpoint &target,
                               const std::time_t departure_timestamp,
                               const std::optional<EdgeDuration> initial_upper_bound =
-                                  std::nullopt)
+                                  std::nullopt,
+                              TemporalAsymmetricSearchDiagnostics *diagnostics = nullptr)
 {
     const auto incoming_edges = detail::BuildIncomingEdgeIndex(facade);
     return detail::SearchWithIncomingEdges(
-        facade, source, target, departure_timestamp, incoming_edges, initial_upper_bound);
+        facade,
+        source,
+        target,
+        departure_timestamp,
+        incoming_edges,
+        initial_upper_bound,
+        diagnostics);
 }
 
 template <typename FacadeT>
@@ -468,10 +532,17 @@ TemporalAsymmetricPath Search(const FacadeT &facade,
                               const std::time_t departure_timestamp,
                               const std::vector<std::vector<detail::IncomingEdge>> &incoming_edges,
                               const std::optional<EdgeDuration> initial_upper_bound =
-                                  std::nullopt)
+                                  std::nullopt,
+                              TemporalAsymmetricSearchDiagnostics *diagnostics = nullptr)
 {
     return detail::SearchWithIncomingEdges(
-        facade, source, target, departure_timestamp, incoming_edges, initial_upper_bound);
+        facade,
+        source,
+        target,
+        departure_timestamp,
+        incoming_edges,
+        initial_upper_bound,
+        diagnostics);
 }
 
 } // namespace osrm::engine::routing_algorithms::mld::temporal

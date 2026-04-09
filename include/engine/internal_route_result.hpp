@@ -15,11 +15,89 @@
 #include "util/integer_range.hpp"
 #include "util/typedefs.hpp"
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <vector>
 
 namespace osrm::engine
 {
+
+struct TemporalAsymmetricSearchDiagnostics
+{
+    std::uint64_t endpoint_pairs_tried = 0;
+    std::uint64_t endpoint_pairs_with_static_upper_bound = 0;
+    std::uint64_t reverse_lower_bound_source_invalid = 0;
+    std::uint64_t queue_exhausted_without_target = 0;
+    std::uint64_t pruned_by_initial_upper_bound = 0;
+    std::uint64_t pruned_by_best_upper_bound = 0;
+    std::uint64_t invalid_duration_relaxations = 0;
+    std::uint64_t target_reached = 0;
+    std::uint64_t best_candidate_rejected = 0;
+    std::uint64_t expanded_nodes = 0;
+    std::uint64_t relaxation_attempts = 0;
+    std::uint64_t relaxation_improvements = 0;
+    std::uint64_t source_first_pop_pruned_by_initial_upper_bound = 0;
+    std::int64_t min_initial_upper_bound_prune_margin =
+        std::numeric_limits<std::int64_t>::max();
+    std::int64_t max_initial_upper_bound_prune_margin =
+        std::numeric_limits<std::int64_t>::min();
+
+    void RecordInitialUpperBoundPruneMargin(const std::int64_t margin)
+    {
+        min_initial_upper_bound_prune_margin =
+            std::min(min_initial_upper_bound_prune_margin, margin);
+        max_initial_upper_bound_prune_margin =
+            std::max(max_initial_upper_bound_prune_margin, margin);
+    }
+
+    std::int64_t MinInitialUpperBoundPruneMarginOrSentinel() const
+    {
+        return min_initial_upper_bound_prune_margin == std::numeric_limits<std::int64_t>::max()
+                   ? -1
+                   : min_initial_upper_bound_prune_margin;
+    }
+
+    std::int64_t MaxInitialUpperBoundPruneMarginOrSentinel() const
+    {
+        return max_initial_upper_bound_prune_margin == std::numeric_limits<std::int64_t>::min()
+                   ? -1
+                   : max_initial_upper_bound_prune_margin;
+    }
+
+    void Merge(const TemporalAsymmetricSearchDiagnostics &other)
+    {
+        endpoint_pairs_tried += other.endpoint_pairs_tried;
+        endpoint_pairs_with_static_upper_bound += other.endpoint_pairs_with_static_upper_bound;
+        reverse_lower_bound_source_invalid += other.reverse_lower_bound_source_invalid;
+        queue_exhausted_without_target += other.queue_exhausted_without_target;
+        pruned_by_initial_upper_bound += other.pruned_by_initial_upper_bound;
+        pruned_by_best_upper_bound += other.pruned_by_best_upper_bound;
+        invalid_duration_relaxations += other.invalid_duration_relaxations;
+        target_reached += other.target_reached;
+        best_candidate_rejected += other.best_candidate_rejected;
+        expanded_nodes += other.expanded_nodes;
+        relaxation_attempts += other.relaxation_attempts;
+        relaxation_improvements += other.relaxation_improvements;
+        source_first_pop_pruned_by_initial_upper_bound +=
+            other.source_first_pop_pruned_by_initial_upper_bound;
+        if (other.min_initial_upper_bound_prune_margin !=
+            std::numeric_limits<std::int64_t>::max())
+        {
+            min_initial_upper_bound_prune_margin =
+                std::min(min_initial_upper_bound_prune_margin,
+                         other.min_initial_upper_bound_prune_margin);
+        }
+        if (other.max_initial_upper_bound_prune_margin !=
+            std::numeric_limits<std::int64_t>::min())
+        {
+            max_initial_upper_bound_prune_margin =
+                std::max(max_initial_upper_bound_prune_margin,
+                         other.max_initial_upper_bound_prune_margin);
+        }
+    }
+};
 
 struct PathData
 {
@@ -52,6 +130,7 @@ struct InternalRouteResult
     std::vector<bool> source_traversed_in_reverse;
     std::vector<bool> target_traversed_in_reverse;
     EdgeWeight shortest_path_weight = INVALID_EDGE_WEIGHT;
+    std::optional<TemporalAsymmetricSearchDiagnostics> temporal_asymmetric_debug;
 
     bool is_valid() const { return INVALID_EDGE_WEIGHT != shortest_path_weight; }
 
@@ -98,6 +177,7 @@ inline InternalRouteResult CollapseInternalRouteResult(const InternalRouteResult
 
     InternalRouteResult collapsed;
     collapsed.shortest_path_weight = leggy_result.shortest_path_weight;
+    collapsed.temporal_asymmetric_debug = leggy_result.temporal_asymmetric_debug;
     for (auto i : util::irange<std::size_t>(0, leggy_result.unpacked_path_segments.size()))
     {
         if (is_waypoint[i])

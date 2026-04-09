@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <ctime>
+#include <string_view>
 #include <vector>
 
 BOOST_AUTO_TEST_SUITE(route_api_temporal)
@@ -448,6 +449,12 @@ std::vector<double> ExtractAnnotationDurations(const util::json::Object &respons
     return result;
 }
 
+double ExtractTemporalDebugNumber(const util::json::Object &response, const std::string_view key)
+{
+    const auto &debug = std::get<util::json::Object>(response.values.at("temporal_debug"));
+    return std::get<util::json::Number>(debug.values.at(key)).value;
+}
+
 engine::api::RouteParameters MakeParameters()
 {
     engine::api::RouteParameters parameters;
@@ -596,6 +603,47 @@ BOOST_AUTO_TEST_CASE(make_response_stays_static_without_departure_time)
     const auto &json = std::get<util::json::Object>(response);
     BOOST_CHECK_EQUAL(ExtractRouteDuration(json), 10.0);
     BOOST_CHECK_EQUAL(ExtractLegDuration(json), 10.0);
+}
+
+BOOST_AUTO_TEST_CASE(make_response_includes_temporal_debug_when_requested)
+{
+    TemporalRouteFacade facade{false};
+    auto parameters = MakeParameters();
+    parameters.temporal_debug = true;
+
+    auto route_result = MakeRouteResult();
+    engine::TemporalAsymmetricSearchDiagnostics diagnostics;
+    diagnostics.endpoint_pairs_tried = 4;
+    diagnostics.endpoint_pairs_with_static_upper_bound = 3;
+    diagnostics.reverse_lower_bound_source_invalid = 2;
+    diagnostics.queue_exhausted_without_target = 1;
+    diagnostics.expanded_nodes = 11;
+    diagnostics.relaxation_attempts = 22;
+    diagnostics.relaxation_improvements = 7;
+    diagnostics.source_first_pop_pruned_by_initial_upper_bound = 5;
+    diagnostics.RecordInitialUpperBoundPruneMargin(3);
+    diagnostics.RecordInitialUpperBoundPruneMargin(9);
+    route_result.routes.front().temporal_asymmetric_debug = diagnostics;
+
+    engine::api::RouteAPI route_api{facade, parameters};
+    engine::api::ResultT response = util::json::Object{};
+    route_api.MakeResponse(route_result, {}, response);
+
+    const auto &json = std::get<util::json::Object>(response);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "endpoint_pairs_tried"), 4.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "endpoint_pairs_with_static_upper_bound"),
+                      3.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "reverse_lower_bound_source_invalid"), 2.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "queue_exhausted_without_target"), 1.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "expanded_nodes"), 11.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "relaxation_attempts"), 22.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "relaxation_improvements"), 7.0);
+    BOOST_CHECK_EQUAL(
+        ExtractTemporalDebugNumber(json, "source_first_pop_pruned_by_initial_upper_bound"), 5.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "min_initial_upper_bound_prune_margin"),
+                      3.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "max_initial_upper_bound_prune_margin"),
+                      9.0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

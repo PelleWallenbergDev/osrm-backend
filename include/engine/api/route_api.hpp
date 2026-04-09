@@ -121,9 +121,87 @@ class RouteAPI : public BaseAPI
         {
             response.values.emplace("data_version", data_timestamp);
         }
+
+        if (parameters.temporal_debug)
+        {
+            AddTemporalAsymmetricDebug(raw_routes, response);
+        }
     }
 
   protected:
+    static util::json::Object
+    MakeTemporalAsymmetricDebug(const TemporalAsymmetricSearchDiagnostics &diagnostics)
+    {
+        util::json::Object debug;
+        debug.values.emplace("endpoint_pairs_tried",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.endpoint_pairs_tried)});
+        debug.values.emplace("endpoint_pairs_with_static_upper_bound",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.endpoint_pairs_with_static_upper_bound)});
+        debug.values.emplace("reverse_lower_bound_source_invalid",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.reverse_lower_bound_source_invalid)});
+        debug.values.emplace("queue_exhausted_without_target",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.queue_exhausted_without_target)});
+        debug.values.emplace("pruned_by_initial_upper_bound",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.pruned_by_initial_upper_bound)});
+        debug.values.emplace("pruned_by_best_upper_bound",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.pruned_by_best_upper_bound)});
+        debug.values.emplace("invalid_duration_relaxations",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.invalid_duration_relaxations)});
+        debug.values.emplace("target_reached",
+                             util::json::Number{static_cast<double>(diagnostics.target_reached)});
+        debug.values.emplace("best_candidate_rejected",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.best_candidate_rejected)});
+        debug.values.emplace("expanded_nodes",
+                             util::json::Number{static_cast<double>(diagnostics.expanded_nodes)});
+        debug.values.emplace("relaxation_attempts",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.relaxation_attempts)});
+        debug.values.emplace("relaxation_improvements",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.relaxation_improvements)});
+        debug.values.emplace("source_first_pop_pruned_by_initial_upper_bound",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.source_first_pop_pruned_by_initial_upper_bound)});
+        debug.values.emplace("min_initial_upper_bound_prune_margin",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.MinInitialUpperBoundPruneMarginOrSentinel())});
+        debug.values.emplace("max_initial_upper_bound_prune_margin",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.MaxInitialUpperBoundPruneMarginOrSentinel())});
+        return debug;
+    }
+
+    static void AddTemporalAsymmetricDebug(const InternalManyRoutesResult &raw_routes,
+                                           util::json::Object &response)
+    {
+        TemporalAsymmetricSearchDiagnostics merged;
+        bool has_diagnostics = false;
+
+        for (const auto &route : raw_routes.routes)
+        {
+            if (!route.temporal_asymmetric_debug)
+            {
+                continue;
+            }
+
+            merged.Merge(*route.temporal_asymmetric_debug);
+            has_diagnostics = true;
+        }
+
+        if (has_diagnostics)
+        {
+            response.values.emplace("temporal_debug", MakeTemporalAsymmetricDebug(merged));
+        }
+    }
+
     template <typename GetWptsFn>
     std::unique_ptr<fbresult::FBResultBuilder>
     MakeFBResponse(const InternalManyRoutesResult &raw_routes,
