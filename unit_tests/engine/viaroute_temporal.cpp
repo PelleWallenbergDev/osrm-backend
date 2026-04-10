@@ -44,6 +44,20 @@ struct FakeTemporalFacade
 
     std::uint32_t GetTemporalWeekBucketCount() const { return 672; }
 
+    bool HasTemporalForwardProfile(const PackedGeometryID id) const
+    {
+        for (const auto &[key, _duration] : forward_temporal)
+        {
+            if (key.first == id)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool HasTemporalReverseProfile(const PackedGeometryID) const { return false; }
+
     EdgeDuration GetTemporalForwardDuration(const PackedGeometryID id,
                                             const std::uint32_t week_bucket) const
     {

@@ -98,16 +98,28 @@ class RouteAPI : public BaseAPI
                  util::json::Object &response) const
     {
         util::json::Array jsRoutes;
+        std::optional<TemporalRouteEvaluationDiagnostics> temporal_route_diagnostics;
+        if (parameters.temporal_debug && parameters.departure_timestamp)
+        {
+            temporal_route_diagnostics.emplace();
+        }
 
         for (const auto &route : raw_routes.routes)
         {
             if (!route.is_valid())
                 continue;
 
+            TemporalRouteEvaluationDiagnostics route_diagnostics;
             jsRoutes.values.push_back(MakeRoute(route.leg_endpoints,
                                                 route.unpacked_path_segments,
                                                 route.source_traversed_in_reverse,
-                                                route.target_traversed_in_reverse));
+                                                route.target_traversed_in_reverse,
+                                                temporal_route_diagnostics ? &route_diagnostics
+                                                                           : nullptr));
+            if (temporal_route_diagnostics)
+            {
+                temporal_route_diagnostics->Merge(route_diagnostics);
+            }
         }
 
         if (!parameters.skip_waypoints)
@@ -124,7 +136,7 @@ class RouteAPI : public BaseAPI
 
         if (parameters.temporal_debug)
         {
-            AddTemporalAsymmetricDebug(raw_routes, response);
+            AddTemporalDebug(raw_routes, temporal_route_diagnostics, response);
         }
     }
 
@@ -206,11 +218,30 @@ class RouteAPI : public BaseAPI
         return debug;
     }
 
-    static void AddTemporalAsymmetricDebug(const InternalManyRoutesResult &raw_routes,
-                                           util::json::Object &response)
+    static void AddTemporalRouteDebug(util::json::Object &debug,
+                                      const TemporalRouteEvaluationDiagnostics &diagnostics)
+    {
+        debug.values.emplace("route_geometries_with_temporal_profiles",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.route_geometries_with_temporal_profiles)});
+        debug.values.emplace("route_geometries_missing_temporal_profiles",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.route_geometries_missing_temporal_profiles)});
+        debug.values.emplace("route_plausibility_rejections",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.route_plausibility_rejections)});
+        debug.values.emplace("route_steps_used_temporal",
+                             util::json::Number{static_cast<double>(
+                                 diagnostics.route_steps_used_temporal)});
+    }
+
+    static void AddTemporalDebug(
+        const InternalManyRoutesResult &raw_routes,
+        const std::optional<TemporalRouteEvaluationDiagnostics> &temporal_route_diagnostics,
+        util::json::Object &response)
     {
         TemporalAsymmetricSearchDiagnostics merged;
-        bool has_diagnostics = false;
+        bool has_search_diagnostics = false;
 
         for (const auto &route : raw_routes.routes)
         {
@@ -220,13 +251,26 @@ class RouteAPI : public BaseAPI
             }
 
             merged.Merge(*route.temporal_asymmetric_debug);
-            has_diagnostics = true;
+            has_search_diagnostics = true;
         }
 
-        if (has_diagnostics)
+        if (!has_search_diagnostics && !temporal_route_diagnostics)
         {
-            response.values.emplace("temporal_debug", MakeTemporalAsymmetricDebug(merged));
+            return;
         }
+
+        util::json::Object debug;
+        if (has_search_diagnostics)
+        {
+            debug = MakeTemporalAsymmetricDebug(merged);
+        }
+
+        if (temporal_route_diagnostics)
+        {
+            AddTemporalRouteDebug(debug, *temporal_route_diagnostics);
+        }
+
+        response.values.emplace("temporal_debug", std::move(debug));
     }
 
     template <typename GetWptsFn>
@@ -843,12 +887,15 @@ class RouteAPI : public BaseAPI
     util::json::Object MakeRoute(const std::vector<PhantomEndpoints> &leg_endpoints,
                                  const std::vector<std::vector<PathData>> &unpacked_path_segments,
                                  const std::vector<bool> &source_traversed_in_reverse,
-                                 const std::vector<bool> &target_traversed_in_reverse) const
+                                 const std::vector<bool> &target_traversed_in_reverse,
+                                 TemporalRouteEvaluationDiagnostics *temporal_route_diagnostics =
+                                     nullptr) const
     {
         auto legs_info = MakeLegs(leg_endpoints,
                                   unpacked_path_segments,
                                   source_traversed_in_reverse,
-                                  target_traversed_in_reverse);
+                                  target_traversed_in_reverse,
+                                  temporal_route_diagnostics);
         std::vector<guidance::RouteLeg> &legs = legs_info.first;
         std::vector<guidance::LegGeometry> &leg_geometries = legs_info.second;
 
@@ -1028,7 +1075,8 @@ class RouteAPI : public BaseAPI
     MakeLegs(const std::vector<PhantomEndpoints> &leg_endpoints,
              const std::vector<std::vector<PathData>> &unpacked_path_segments,
              const std::vector<bool> &source_traversed_in_reverse,
-             const std::vector<bool> &target_traversed_in_reverse) const
+             const std::vector<bool> &target_traversed_in_reverse,
+             TemporalRouteEvaluationDiagnostics *temporal_route_diagnostics = nullptr) const
     {
         auto result =
             std::make_pair(std::vector<guidance::RouteLeg>(), std::vector<guidance::LegGeometry>());
@@ -1069,6 +1117,10 @@ class RouteAPI : public BaseAPI
                 source_phantom = std::move(temporal_leg.source_phantom);
                 target_phantom = std::move(temporal_leg.target_phantom);
                 current_departure_timestamp_ds = temporal_leg.arrival_timestamp_ds;
+                if (temporal_route_diagnostics)
+                {
+                    temporal_route_diagnostics->Merge(temporal_leg.diagnostics);
+                }
             }
 
             auto leg = guidance::assembleLeg(facade,

@@ -165,6 +165,24 @@ struct TemporalAsymmetricSearchDiagnostics
     }
 };
 
+struct TemporalRouteEvaluationDiagnostics
+{
+    std::uint64_t route_geometries_with_temporal_profiles = 0;
+    std::uint64_t route_geometries_missing_temporal_profiles = 0;
+    std::uint64_t route_plausibility_rejections = 0;
+    std::uint64_t route_steps_used_temporal = 0;
+
+    void Merge(const TemporalRouteEvaluationDiagnostics &other)
+    {
+        route_geometries_with_temporal_profiles +=
+            other.route_geometries_with_temporal_profiles;
+        route_geometries_missing_temporal_profiles +=
+            other.route_geometries_missing_temporal_profiles;
+        route_plausibility_rejections += other.route_plausibility_rejections;
+        route_steps_used_temporal += other.route_steps_used_temporal;
+    }
+};
+
 struct PathData
 {
     // from edge-based-node id

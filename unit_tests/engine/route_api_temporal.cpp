@@ -677,4 +677,24 @@ BOOST_AUTO_TEST_CASE(make_response_includes_temporal_debug_when_requested)
                       9.0);
 }
 
+BOOST_AUTO_TEST_CASE(make_response_includes_route_temporal_debug_for_departure_requests)
+{
+    TemporalRouteFacade facade{true};
+    auto parameters = MakeParameters();
+    parameters.temporal_debug = true;
+    parameters.departure_timestamp = std::time_t{1735689600};
+
+    engine::api::RouteAPI route_api{facade, parameters};
+    engine::api::ResultT response = util::json::Object{};
+    route_api.MakeResponse(MakeRouteResult(), {}, response);
+
+    const auto &json = std::get<util::json::Object>(response);
+    BOOST_CHECK_EQUAL(
+        ExtractTemporalDebugNumber(json, "route_geometries_with_temporal_profiles"), 1.0);
+    BOOST_CHECK_EQUAL(
+        ExtractTemporalDebugNumber(json, "route_geometries_missing_temporal_profiles"), 0.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "route_plausibility_rejections"), 0.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "route_steps_used_temporal"), 1.0);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

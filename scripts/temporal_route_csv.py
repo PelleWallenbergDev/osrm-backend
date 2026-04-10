@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Smoke-test temporal OSRM route behavior over many coordinate pairs.
+Test temporal OSRM route behavior using coordinate pairs from a CSV file.
 
-The script compares three requests for each sampled pair:
+The script compares three requests for each pair in the CSV:
 
   1. static route
   2. depart_at route, which temporalizes durations on the selected route
@@ -20,23 +20,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import http.client
 import json
-import math
-import random
 import sys
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timedelta
 
 
-DEFAULT_THESSALONIKI_BBOX = (22.90, 40.58, 23.02, 40.70)
 THREAD_LOCAL = threading.local()
-TEMPORAL_ROUTE_DEBUG_FIELDS = [
-    "route_geometries_with_temporal_profiles",
-    "route_geometries_missing_temporal_profiles",
-    "route_plausibility_rejections",
-    "route_steps_used_temporal",
-]
-TEMPORAL_ASYM_SEARCH_DEBUG_FIELDS = [
+TEMPORAL_DEBUG_FIELDS = [
     "endpoint_pairs_tried",
     "endpoint_pairs_with_static_upper_bound",
     "static_upper_bound_pair_match_count",
@@ -62,6 +54,18 @@ TEMPORAL_ASYM_SEARCH_DEBUG_FIELDS = [
     "min_initial_upper_bound_prune_margin",
     "max_initial_upper_bound_prune_margin",
 ]
+
+day_map = {
+    "mon": 0,
+    "tue": 1,
+    "wed": 2,
+    "tor": 3,  # torsdag
+    "thurs": 3,
+    "fri": 4,
+    "sat": 5,
+    "sun": 6,
+    "sön": 6,
+}
 
 
 class ThreadLocalHTTPSession:
@@ -111,41 +115,38 @@ class ThreadLocalHTTPSession:
             return response.status, body
 
 
-def parse_bbox(value):
-    parts = [float(part.strip()) for part in value.split(",")]
-    if len(parts) != 4:
-        raise argparse.ArgumentTypeError(
-            "bbox must be min_lon,min_lat,max_lon,max_lat"
-        )
-    min_lon, min_lat, max_lon, max_lat = parts
-    if min_lon >= max_lon or min_lat >= max_lat:
-        raise argparse.ArgumentTypeError("bbox min values must be smaller than max values")
-    return min_lon, min_lat, max_lon, max_lat
-
-
-def parse_departure_range(value):
-    parts = [int(part.strip()) for part in value.split(",")]
-    if len(parts) != 2:
-        raise argparse.ArgumentTypeError("departure range must be min_timestamp,max_timestamp")
-    start, end = parts
-    if start > end:
-        raise argparse.ArgumentTypeError("departure range start must be <= end")
-    return start, end
-
-
-def haversine_km(a, b):
-    lon1, lat1 = a
-    lon2, lat2 = b
-    radius_km = 6371.0088
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    h = (
-        math.sin(dphi / 2.0) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
-    )
-    return 2.0 * radius_km * math.asin(math.sqrt(h))
+def parse_departure(departure_str, base_date):
+    parts = departure_str.split()
+    if len(parts) >= 2:
+        day_str = parts[0].lower()
+        time_str = ' '.join(parts[1:])
+    else:
+        raise ValueError(f"Invalid departure format: {departure_str}")
+    
+    day_num = day_map.get(day_str)
+    if day_num is None:
+        raise ValueError(f"Unknown day {day_str}")
+    
+    # Parse time
+    try:
+        dt_time = datetime.strptime(time_str, "%I:%M:%S %p").time()
+    except ValueError:
+        try:
+            dt_time = datetime.strptime(time_str, "%H:%M").time()
+        except ValueError:
+            try:
+                dt_time = datetime.strptime(time_str, "%I:%M %p").time()
+            except ValueError:
+                raise ValueError(f"Invalid time format: {time_str}")
+    
+    # Find next occurrence
+    current_weekday = base_date.weekday()
+    days_ahead = (day_num - current_weekday) % 7
+    if days_ahead == 0 and dt_time <= base_date.time():
+        days_ahead = 7
+    next_date = base_date + timedelta(days=days_ahead)
+    departure_dt = datetime.combine(next_date, dt_time)
+    return int(departure_dt.timestamp())
 
 
 def get_session(timeout):
@@ -161,7 +162,7 @@ def open_json(url, timeout, pool_size):
     session = get_session(timeout)
     started = time.perf_counter()
     try:
-        status, text = session.get(url, headers={"User-Agent": "osrm-temporal-smoke"})
+        status, text = session.get(url, headers={"User-Agent": "osrm-temporal-csv"})
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         try:
             payload = json.loads(text)
@@ -182,10 +183,10 @@ def route_url(host, start, target, departure, mode, temporal_debug):
     }
     if departure is not None:
         params["depart_at"] = str(departure)
-    if temporal_debug:
-        params["temporal_debug"] = "true"
     if mode == "asymmetric":
         params["temporal_mode"] = "asymmetric"
+        if temporal_debug:
+            params["temporal_debug"] = "true"
 
     return f"{host.rstrip('/')}/route/v1/driving/{coordinates}?{urllib.parse.urlencode(params)}"
 
@@ -222,88 +223,24 @@ def route(
     return result
 
 
-def snap(host, coord, timeout, pool_size):
-    status, payload, _elapsed_ms = open_json(nearest_url(host, coord), timeout, pool_size)
-    if status != 200 or payload.get("code") != "Ok" or not payload.get("waypoints"):
-        return None
-    location = payload["waypoints"][0].get("location")
-    if not location or len(location) != 2:
-        return None
-    return float(location[0]), float(location[1])
-
-
-def parse_point_row(row):
-    lower = {key.lower(): value for key, value in row.items() if key is not None}
-    lon_keys = ("lon", "longitude", "@lon", "x")
-    lat_keys = ("lat", "latitude", "@lat", "y")
-
-    lon = next((lower[key] for key in lon_keys if key in lower), None)
-    lat = next((lower[key] for key in lat_keys if key in lower), None)
-    if lon is not None and lat is not None:
-        return float(lon), float(lat)
-
-    values = list(row.values())
-    numeric = []
-    for value in values:
-        try:
-            numeric.append(float(value))
-        except (TypeError, ValueError):
-            pass
-    if len(numeric) >= 2:
-        return numeric[0], numeric[1]
-
-    return None
-
-
-def read_points(path):
+def read_pairs(path):
+    base_date = datetime(2026, 4, 10)
     with open(path, newline="", encoding="utf-8-sig") as handle:
-        sample = handle.read(4096)
-        handle.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",\t; ")
-            has_header = csv.Sniffer().has_header(sample)
-        except csv.Error:
-            dialect = csv.excel
-            has_header = True
-
-        points = []
-        if has_header:
-            reader = csv.DictReader(handle, dialect=dialect)
-            for row in reader:
-                point = parse_point_row(row)
-                if point is not None:
-                    points.append(point)
-        else:
-            reader = csv.reader(handle, dialect=dialect)
-            for row in reader:
-                if len(row) < 2:
-                    continue
-                try:
-                    points.append((float(row[0]), float(row[1])))
-                except ValueError:
-                    continue
-
-    if len(points) < 2:
-        raise RuntimeError(f"{path} must contain at least two points")
-    return points
-
-
-def random_point(bbox):
-    min_lon, min_lat, max_lon, max_lat = bbox
-    return random.uniform(min_lon, max_lon), random.uniform(min_lat, max_lat)
-
-
-def sample_pair(points, bbox, max_straight_line_km, max_attempts=500):
-    for _ in range(max_attempts):
-        if points:
-            start, target = random.sample(points, 2)
-        else:
-            start, target = random_point(bbox), random_point(bbox)
-
-        if max_straight_line_km <= 0 or haversine_km(start, target) <= max_straight_line_km:
-            return start, target
-
-    raise RuntimeError("could not sample a pair within max straight-line distance")
+        reader = csv.DictReader(handle)
+        pairs = []
+        for row in reader:
+            index = int(row['Index'])
+            start = (float(row['SourceLong']), float(row['SourceLat']))
+            target = (float(row['TargetLong']), float(row['TargetLat']))
+            departure_str = row['Depature time']
+            duration_google_min = row['Duration Google (min)']
+            try:
+                departure = parse_departure(departure_str, base_date)
+            except ValueError as e:
+                print(f"Error parsing departure for row {index}: {e}, using default")
+                departure = 1735689600  # default
+            pairs.append((index, start, target, departure, duration_google_min))
+        return pairs
 
 
 def differs(reference, candidate, duration_tolerance):
@@ -322,27 +259,14 @@ def write_csv_header(writer):
             "start_lon",
             "target_lat",
             "target_lon",
-            "departure",
             "departure_minutes",
             "static_code",
             "depart_code",
             "asymmetric_code",
-            "static_duration_seconds",
             "static_duration_minutes",
-            "depart_duration_seconds",
             "depart_duration_minutes",
-            "asymmetric_duration_seconds",
             "asymmetric_duration_minutes",
-            "depart_effect",
-            "asymmetric_effect",
-            "static_ok_asymmetric_failed",
-            "asymmetric_message",
-            "static_ms",
-            "depart_ms",
-            "asymmetric_ms",
-            *[f"depart_debug_{field}" for field in TEMPORAL_ROUTE_DEBUG_FIELDS],
-            *[f"asym_route_debug_{field}" for field in TEMPORAL_ROUTE_DEBUG_FIELDS],
-            *[f"asym_debug_{field}" for field in TEMPORAL_ASYM_SEARCH_DEBUG_FIELDS],
+            "duration_google_min",
         ]
     )
 
@@ -354,9 +278,8 @@ def seconds_to_minutes(value):
 
 
 def write_csv_row(
-    writer, index, start, target, departure, static, depart, asymmetric, depart_effect, asym_effect
+    writer, index, start, target, departure, static, depart, asymmetric, duration_google_min
 ):
-    static_ok_asym_failed = static["code"] == "Ok" and asymmetric["code"] != "Ok"
     writer.writerow(
         [
             index,
@@ -364,67 +287,24 @@ def write_csv_row(
             f"{start[0]:.7f}",
             f"{target[1]:.7f}",
             f"{target[0]:.7f}",
-            departure,
             seconds_to_minutes(departure),
             static["code"],
             depart["code"],
             asymmetric["code"],
-            static["duration"],
             seconds_to_minutes(static["duration"]),
-            depart["duration"],
             seconds_to_minutes(depart["duration"]),
-            asymmetric["duration"],
             seconds_to_minutes(asymmetric["duration"]),
-            int(depart_effect),
-            int(asym_effect),
-            int(static_ok_asym_failed),
-            asymmetric["message"],
-            f"{static['elapsed_ms']:.2f}",
-            f"{depart['elapsed_ms']:.2f}",
-            f"{asymmetric['elapsed_ms']:.2f}",
-            *[
-                depart["temporal_debug"].get(field)
-                for field in TEMPORAL_ROUTE_DEBUG_FIELDS
-            ],
-            *[
-                asymmetric["temporal_debug"].get(field)
-                for field in TEMPORAL_ROUTE_DEBUG_FIELDS
-            ],
-            *[
-                asymmetric["temporal_debug"].get(field)
-                for field in TEMPORAL_ASYM_SEARCH_DEBUG_FIELDS
-            ],
+            duration_google_min,
         ]
     )
 
 
-def process_pair(args, index, start, target, departure):
-    if args.snap_samples:
-        snapped_start = snap(args.host, start, args.timeout, args.workers)
-        snapped_target = snap(args.host, target, args.timeout, args.workers)
-        if snapped_start is None or snapped_target is None:
-            return {
-                "index": index,
-                "snap_failed": True,
-                "start": start,
-                "target": target,
-            }
-        start, target = snapped_start, snapped_target
-
+def process_pair(args, index, start, target, departure, duration_google_min):
     static = route(args.host, start, target, args.timeout, args.workers)
-    depart = route(
-        args.host,
-        start,
-        target,
-        args.timeout,
-        args.workers,
-        departure,
-        temporal_debug=args.temporal_debug,
-    )
+    depart = route(args.host, start, target, args.timeout, args.workers, departure)
     asymmetric = route(
         args.host,
-        start,
-        target,
+        start, target,
         args.timeout,
         args.workers,
         departure,
@@ -437,7 +317,6 @@ def process_pair(args, index, start, target, departure):
 
     return {
         "index": index,
-        "snap_failed": False,
         "start": start,
         "target": target,
         "departure": departure,
@@ -446,13 +325,14 @@ def process_pair(args, index, start, target, departure):
         "asymmetric": asymmetric,
         "depart_effect": depart_effect,
         "asymmetric_effect": asym_effect,
+        "duration_google_min": duration_google_min,
     }
 
 
 def run(args):
-    random.seed(args.seed)
+    pairs = read_pairs(args.csv)
+    work_items = pairs
 
-    points = read_points(args.points) if args.points else []
     output_handle = open(args.output_csv, "w", newline="", encoding="utf-8") if args.output_csv else None
     writer = csv.writer(output_handle) if output_handle else None
     if writer:
@@ -467,25 +347,13 @@ def run(args):
         "asymmetric_effect": 0,
         "no_temporal_effect": 0,
         "static_ok_asymmetric_failed": 0,
-        "snap_failed": 0,
     }
 
     try:
-        work_items = [
-            (
-                index,
-                *sample_pair(points, args.bbox, args.max_straight_line_km),
-                random.randint(*args.departure_range)
-                if args.departure_range
-                else args.departure,
-            )
-            for index in range(args.requests)
-        ]
-
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             futures = {
-                executor.submit(process_pair, args, index, start, target, departure): index
-                for index, start, target, departure in work_items
+                executor.submit(process_pair, args, index, start, target, departure, duration_google_min): index
+                for index, start, target, departure, duration_google_min in work_items
             }
 
             for completed, future in enumerate(as_completed(futures), start=1):
@@ -493,10 +361,6 @@ def run(args):
                     result = future.result()
                 except Exception as error:
                     print(f"Worker error for request {futures[future]}: {error}")
-                    continue
-
-                if result["snap_failed"]:
-                    counters["snap_failed"] += 1
                     continue
 
                 index = result["index"]
@@ -508,6 +372,7 @@ def run(args):
                 asymmetric = result["asymmetric"]
                 depart_effect = result["depart_effect"]
                 asym_effect = result["asymmetric_effect"]
+                duration_google_min = result["duration_google_min"]
 
                 counters["sampled"] += 1
                 counters["static_ok"] += int(static["code"] == "Ok")
@@ -528,27 +393,12 @@ def run(args):
 
                 if writer:
                     write_csv_row(
-                        writer,
-                        index,
-                        start,
-                        target,
-                        departure,
-                        static,
-                        depart,
-                        asymmetric,
-                        depart_effect,
-                        asym_effect,
+                        writer, index, start, target, departure, static, depart, asymmetric, duration_google_min
                     )
 
-                if args.progress_every and completed % args.progress_every == 0:
-                    print(
-                        f"{completed}/{args.requests}: "
-                        f"static_ok={counters['static_ok']} "
-                        f"asym_ok={counters['asymmetric_ok']} "
-                        f"depart_effect={counters['depart_effect']} "
-                        f"asym_effect={counters['asymmetric_effect']} "
-                        f"asym_regressions={counters['static_ok_asymmetric_failed']}"
-                    )
+                if completed % 10 == 0 or completed == len(work_items):
+                    print(f"Completed {completed}/{len(work_items)} requests")
+
     finally:
         if output_handle:
             output_handle.close()
@@ -578,66 +428,18 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="http://127.0.0.1:5000")
-    parser.add_argument("--requests", type=int, default=100)
+    parser.add_argument("--csv", required=True, help="CSV file with coordinate pairs")
     parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument("--departure", type=int, default=1735689600)
-    parser.add_argument(
-        "--departure-range",
-        type=parse_departure_range,
-        help="Randomize depart_at per request within min_timestamp,max_timestamp inclusive.",
-    )
-    parser.add_argument("--bbox", type=parse_bbox, default=DEFAULT_THESSALONIKI_BBOX)
-    parser.add_argument(
-        "--points",
-        help="Optional CSV/TSV file with lon/lat or @lon/@lat columns. If omitted, random bbox points are used.",
-    )
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--duration-tolerance", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=30.0)
-    parser.add_argument(
-        "--duration-tolerance",
-        type=float,
-        default=0.1,
-        help="Seconds of route-duration difference needed to count as a temporal effect.",
-    )
-    parser.add_argument(
-        "--max-straight-line-km",
-        type=float,
-        default=4.0,
-        help="Maximum straight-line distance for generated pairs. Use 0 to disable.",
-    )
-    parser.add_argument(
-        "--snap-samples",
-        action="store_true",
-        help="Call /nearest for each random point before routing.",
-    )
-    parser.add_argument("--output-csv", help="Optional per-request result CSV path.")
-    parser.add_argument("--progress-every", type=int, default=10)
-    parser.add_argument(
-        "--temporal-debug",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Request temporal asymmetric search diagnostics and export them to CSV.",
-    )
-    parser.add_argument(
-        "--min-temporal-effects",
-        type=int,
-        default=0,
-        help="Fail unless at least this many depart/asymmetric requests differ from static.",
-    )
-    parser.add_argument(
-        "--fail-on-asymmetric-noroute",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Fail if static route is Ok but temporal_mode=asymmetric is not Ok.",
-    )
+    parser.add_argument("--output-csv", help="Output CSV file for results")
+    parser.add_argument("--temporal-debug", action="store_true", help="Enable temporal debug output")
+    parser.add_argument("--fail-on-asymmetric-noroute", action="store_true")
+    parser.add_argument("--min-temporal-effects", type=int, default=0)
 
     args = parser.parse_args()
-    if args.requests <= 0:
-        parser.error("--requests must be positive")
-    if args.workers <= 0:
-        parser.error("--workers must be positive")
-    return run(args)
+    sys.exit(run(args))
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

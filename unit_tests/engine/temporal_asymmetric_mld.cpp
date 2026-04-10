@@ -76,6 +76,14 @@ struct TemporalSearchFacade
 
     std::uint32_t GetTemporalWeekBucketCount() const { return 672; }
 
+    bool HasTemporalForwardProfile(const PackedGeometryID id) const
+    {
+        return id < forward_temporal_min.size() &&
+               forward_temporal_min[id] != INVALID_EDGE_DURATION;
+    }
+
+    bool HasTemporalReverseProfile(const PackedGeometryID) const { return false; }
+
     EdgeDuration GetTemporalForwardDuration(const PackedGeometryID id,
                                             const std::uint32_t week_bucket) const
     {
