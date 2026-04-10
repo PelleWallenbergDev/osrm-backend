@@ -206,6 +206,40 @@ BOOST_AUTO_TEST_CASE(search_keeps_equal_initial_upper_bound_as_valid_solution)
     BOOST_CHECK_EQUAL(result.nodes[2], 2);
 }
 
+BOOST_AUTO_TEST_CASE(search_does_not_prune_against_initial_upper_bound_before_exact_candidate)
+{
+    TemporalSearchFacade facade;
+    facade.static_forward_durations = {
+        {SegmentDuration{10}}, {SegmentDuration{10}}, {SegmentDuration{10}}};
+    facade.forward_temporal = {};
+    facade.forward_temporal_min = {EdgeDuration{10}, EdgeDuration{10}, EdgeDuration{10}};
+    facade.turn_penalties = {TurnPenalty{0}, TurnPenalty{0}};
+    facade.edges = {{1, {0}, true}, {2, {1}, true}};
+    facade.edge_offsets = {0, 1, 2, 2};
+
+    const auto source_phantom = MakeTemporalPhantom(0, EdgeDuration{0});
+    const auto target_phantom = MakeTemporalPhantom(2, EdgeDuration{10});
+
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 2, false};
+
+    engine::TemporalAsymmetricSearchDiagnostics diagnostics;
+    const auto result = engine::routing_algorithms::mld::temporal::Search(
+        facade, source, target, std::time_t{1735689600}, EdgeDuration{29}, &diagnostics);
+
+    BOOST_REQUIRE(result.is_valid());
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(result.total_duration), 30);
+    BOOST_REQUIRE_EQUAL(result.nodes.size(), 3UL);
+    BOOST_CHECK_EQUAL(result.nodes[0], 0);
+    BOOST_CHECK_EQUAL(result.nodes[1], 1);
+    BOOST_CHECK_EQUAL(result.nodes[2], 2);
+    BOOST_CHECK_EQUAL(diagnostics.pruned_by_initial_upper_bound, 0);
+    BOOST_CHECK_EQUAL(diagnostics.source_first_pop_pruned_by_initial_upper_bound, 0);
+    BOOST_CHECK_EQUAL(diagnostics.target_reached, 1);
+}
+
 BOOST_AUTO_TEST_CASE(search_ignores_negative_initial_upper_bound)
 {
     TemporalSearchFacade facade;

@@ -258,11 +258,8 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
     TemporalAsymmetricSearchDiagnostics *diagnostics = nullptr)
 {
     TemporalAsymmetricPath best_path;
-    const auto has_initial_upper_bound =
-        initial_upper_bound &&
-        engine::temporal::detail::IsFiniteNonNegativeDuration(*initial_upper_bound);
-    auto best_upper_bound =
-        has_initial_upper_bound ? *initial_upper_bound : INVALID_EDGE_DURATION;
+    (void)initial_upper_bound;
+    auto best_upper_bound = INVALID_EDGE_DURATION;
     const auto departure_clock = engine::temporal::ToTemporalClock(departure_timestamp);
 
     if (source.node == target.node)
@@ -323,28 +320,11 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
         const auto optimistic_total = SafeDurationAdd(current.cost, lower_bound);
         if (best_upper_bound != INVALID_EDGE_DURATION &&
             optimistic_total != INVALID_EDGE_DURATION &&
-            (best_path.is_valid() ? optimistic_total >= best_upper_bound
-                                  : optimistic_total > best_upper_bound))
+            optimistic_total >= best_upper_bound)
         {
             if (diagnostics)
             {
-                if (!best_path.is_valid() && has_initial_upper_bound)
-                {
-                    ++diagnostics->pruned_by_initial_upper_bound;
-                    const auto prune_margin =
-                        std::max<std::int64_t>(0,
-                                               from_alias<std::int64_t>(optimistic_total) -
-                                                   from_alias<std::int64_t>(best_upper_bound));
-                    diagnostics->RecordInitialUpperBoundPruneMargin(prune_margin);
-                    if (current.node == source.node && current.cost == EdgeDuration{0})
-                    {
-                        ++diagnostics->source_first_pop_pruned_by_initial_upper_bound;
-                    }
-                }
-                else
-                {
-                    ++diagnostics->pruned_by_best_upper_bound;
-                }
+                ++diagnostics->pruned_by_best_upper_bound;
             }
             continue;
         }
