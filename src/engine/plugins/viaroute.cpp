@@ -28,6 +28,33 @@ MakeTemporalAsymmetricDebug(const TemporalAsymmetricSearchDiagnostics &diagnosti
     debug.values.emplace("endpoint_pairs_with_static_upper_bound",
                          util::json::Number{static_cast<double>(
                              diagnostics.endpoint_pairs_with_static_upper_bound)});
+    debug.values.emplace("static_upper_bound_pair_match_count",
+                         util::json::Number{static_cast<double>(
+                             diagnostics.static_upper_bound_pair_match_count)});
+    debug.values.emplace("static_upper_bound_source_mismatch_count",
+                         util::json::Number{static_cast<double>(
+                             diagnostics.static_upper_bound_source_mismatch_count)});
+    debug.values.emplace("static_upper_bound_target_mismatch_count",
+                         util::json::Number{static_cast<double>(
+                             diagnostics.static_upper_bound_target_mismatch_count)});
+    debug.values.emplace("static_upper_bound_direction_mismatch_count",
+                         util::json::Number{static_cast<double>(
+                             diagnostics.static_upper_bound_direction_mismatch_count)});
+    debug.values.emplace("static_upper_bound_route_endpoint_unavailable_count",
+                         util::json::Number{static_cast<double>(
+                             diagnostics.static_upper_bound_route_endpoint_unavailable_count)});
+    debug.values.emplace("first_static_upper_bound_mismatch_directed_source_node",
+                         util::json::Number{static_cast<double>(
+                             diagnostics.first_static_upper_bound_mismatch_directed_source_node)});
+    debug.values.emplace("first_static_upper_bound_mismatch_directed_target_node",
+                         util::json::Number{static_cast<double>(
+                             diagnostics.first_static_upper_bound_mismatch_directed_target_node)});
+    debug.values.emplace("first_static_upper_bound_mismatch_route_source_node",
+                         util::json::Number{static_cast<double>(
+                             diagnostics.first_static_upper_bound_mismatch_route_source_node)});
+    debug.values.emplace("first_static_upper_bound_mismatch_route_target_node",
+                         util::json::Number{static_cast<double>(
+                             diagnostics.first_static_upper_bound_mismatch_route_target_node)});
     debug.values.emplace("reverse_lower_bound_source_invalid",
                          util::json::Number{static_cast<double>(
                              diagnostics.reverse_lower_bound_source_invalid)});

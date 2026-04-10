@@ -6,8 +6,33 @@
 
 #include "util/for_each_pair.hpp"
 
+#include <optional>
+#include <utility>
+
 namespace osrm::engine::routing_algorithms
 {
+namespace
+{
+std::optional<std::pair<NodeID, NodeID>>
+GetRouteEndpointNodes(const InternalRouteResult &route)
+{
+    if (!route.is_valid() || route.leg_endpoints.empty() || route.source_traversed_in_reverse.empty() ||
+        route.target_traversed_in_reverse.empty())
+    {
+        return std::nullopt;
+    }
+
+    const auto &endpoints = route.leg_endpoints.front();
+    const auto route_source_node = route.source_traversed_in_reverse.front()
+                                       ? endpoints.source_phantom.reverse_segment_id.id
+                                       : endpoints.source_phantom.forward_segment_id.id;
+    const auto route_target_node = route.target_traversed_in_reverse.front()
+                                       ? endpoints.target_phantom.reverse_segment_id.id
+                                       : endpoints.target_phantom.forward_segment_id.id;
+
+    return std::make_pair(route_source_node, route_target_node);
+}
+} // namespace
 
 /// This is a stripped down version of the general shortest path algorithm.
 /// The general algorithm always computes two queries for each leg. This is only
@@ -143,6 +168,17 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
                 {
                     initial_upper_bound = evaluation.total_duration;
                     ++diagnostics.endpoint_pairs_with_static_upper_bound;
+                    if (const auto route_endpoint_nodes = GetRouteEndpointNodes(static_route))
+                    {
+                        diagnostics.RecordStaticUpperBoundDirectionCheck(source.node,
+                                                                         target.node,
+                                                                         route_endpoint_nodes->first,
+                                                                         route_endpoint_nodes->second);
+                    }
+                    else
+                    {
+                        ++diagnostics.static_upper_bound_route_endpoint_unavailable_count;
+                    }
                 }
             }
 

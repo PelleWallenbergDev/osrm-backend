@@ -615,6 +615,15 @@ BOOST_AUTO_TEST_CASE(make_response_includes_temporal_debug_when_requested)
     engine::TemporalAsymmetricSearchDiagnostics diagnostics;
     diagnostics.endpoint_pairs_tried = 4;
     diagnostics.endpoint_pairs_with_static_upper_bound = 3;
+    diagnostics.static_upper_bound_pair_match_count = 2;
+    diagnostics.static_upper_bound_source_mismatch_count = 1;
+    diagnostics.static_upper_bound_target_mismatch_count = 1;
+    diagnostics.static_upper_bound_direction_mismatch_count = 1;
+    diagnostics.static_upper_bound_route_endpoint_unavailable_count = 0;
+    diagnostics.first_static_upper_bound_mismatch_directed_source_node = 101;
+    diagnostics.first_static_upper_bound_mismatch_directed_target_node = 202;
+    diagnostics.first_static_upper_bound_mismatch_route_source_node = 303;
+    diagnostics.first_static_upper_bound_mismatch_route_target_node = 404;
     diagnostics.reverse_lower_bound_source_invalid = 2;
     diagnostics.queue_exhausted_without_target = 1;
     diagnostics.expanded_nodes = 11;
@@ -633,6 +642,28 @@ BOOST_AUTO_TEST_CASE(make_response_includes_temporal_debug_when_requested)
     BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "endpoint_pairs_tried"), 4.0);
     BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "endpoint_pairs_with_static_upper_bound"),
                       3.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "static_upper_bound_pair_match_count"), 2.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "static_upper_bound_source_mismatch_count"),
+                      1.0);
+    BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "static_upper_bound_target_mismatch_count"),
+                      1.0);
+    BOOST_CHECK_EQUAL(
+        ExtractTemporalDebugNumber(json, "static_upper_bound_direction_mismatch_count"), 1.0);
+    BOOST_CHECK_EQUAL(
+        ExtractTemporalDebugNumber(json, "static_upper_bound_route_endpoint_unavailable_count"),
+        0.0);
+    BOOST_CHECK_EQUAL(
+        ExtractTemporalDebugNumber(json, "first_static_upper_bound_mismatch_directed_source_node"),
+        101.0);
+    BOOST_CHECK_EQUAL(
+        ExtractTemporalDebugNumber(json, "first_static_upper_bound_mismatch_directed_target_node"),
+        202.0);
+    BOOST_CHECK_EQUAL(
+        ExtractTemporalDebugNumber(json, "first_static_upper_bound_mismatch_route_source_node"),
+        303.0);
+    BOOST_CHECK_EQUAL(
+        ExtractTemporalDebugNumber(json, "first_static_upper_bound_mismatch_route_target_node"),
+        404.0);
     BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "reverse_lower_bound_source_invalid"), 2.0);
     BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "queue_exhausted_without_target"), 1.0);
     BOOST_CHECK_EQUAL(ExtractTemporalDebugNumber(json, "expanded_nodes"), 11.0);

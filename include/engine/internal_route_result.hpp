@@ -28,6 +28,11 @@ struct TemporalAsymmetricSearchDiagnostics
 {
     std::uint64_t endpoint_pairs_tried = 0;
     std::uint64_t endpoint_pairs_with_static_upper_bound = 0;
+    std::uint64_t static_upper_bound_pair_match_count = 0;
+    std::uint64_t static_upper_bound_source_mismatch_count = 0;
+    std::uint64_t static_upper_bound_target_mismatch_count = 0;
+    std::uint64_t static_upper_bound_direction_mismatch_count = 0;
+    std::uint64_t static_upper_bound_route_endpoint_unavailable_count = 0;
     std::uint64_t reverse_lower_bound_source_invalid = 0;
     std::uint64_t queue_exhausted_without_target = 0;
     std::uint64_t pruned_by_initial_upper_bound = 0;
@@ -43,6 +48,10 @@ struct TemporalAsymmetricSearchDiagnostics
         std::numeric_limits<std::int64_t>::max();
     std::int64_t max_initial_upper_bound_prune_margin =
         std::numeric_limits<std::int64_t>::min();
+    std::int64_t first_static_upper_bound_mismatch_directed_source_node = -1;
+    std::int64_t first_static_upper_bound_mismatch_directed_target_node = -1;
+    std::int64_t first_static_upper_bound_mismatch_route_source_node = -1;
+    std::int64_t first_static_upper_bound_mismatch_route_target_node = -1;
 
     void RecordInitialUpperBoundPruneMargin(const std::int64_t margin)
     {
@@ -50,6 +59,44 @@ struct TemporalAsymmetricSearchDiagnostics
             std::min(min_initial_upper_bound_prune_margin, margin);
         max_initial_upper_bound_prune_margin =
             std::max(max_initial_upper_bound_prune_margin, margin);
+    }
+
+    void RecordStaticUpperBoundDirectionCheck(const NodeID directed_source_node,
+                                              const NodeID directed_target_node,
+                                              const NodeID route_source_node,
+                                              const NodeID route_target_node)
+    {
+        const auto directed_source_raw = static_cast<std::int64_t>(directed_source_node);
+        const auto directed_target_raw = static_cast<std::int64_t>(directed_target_node);
+        const auto route_source_raw = static_cast<std::int64_t>(route_source_node);
+        const auto route_target_raw = static_cast<std::int64_t>(route_target_node);
+
+        const bool source_matches = directed_source_raw == route_source_raw;
+        const bool target_matches = directed_target_raw == route_target_raw;
+
+        if (source_matches && target_matches)
+        {
+            ++static_upper_bound_pair_match_count;
+            return;
+        }
+
+        if (!source_matches)
+        {
+            ++static_upper_bound_source_mismatch_count;
+        }
+        if (!target_matches)
+        {
+            ++static_upper_bound_target_mismatch_count;
+        }
+        ++static_upper_bound_direction_mismatch_count;
+
+        if (first_static_upper_bound_mismatch_directed_source_node < 0)
+        {
+            first_static_upper_bound_mismatch_directed_source_node = directed_source_raw;
+            first_static_upper_bound_mismatch_directed_target_node = directed_target_raw;
+            first_static_upper_bound_mismatch_route_source_node = route_source_raw;
+            first_static_upper_bound_mismatch_route_target_node = route_target_raw;
+        }
     }
 
     std::int64_t MinInitialUpperBoundPruneMarginOrSentinel() const
@@ -70,6 +117,13 @@ struct TemporalAsymmetricSearchDiagnostics
     {
         endpoint_pairs_tried += other.endpoint_pairs_tried;
         endpoint_pairs_with_static_upper_bound += other.endpoint_pairs_with_static_upper_bound;
+        static_upper_bound_pair_match_count += other.static_upper_bound_pair_match_count;
+        static_upper_bound_source_mismatch_count += other.static_upper_bound_source_mismatch_count;
+        static_upper_bound_target_mismatch_count += other.static_upper_bound_target_mismatch_count;
+        static_upper_bound_direction_mismatch_count +=
+            other.static_upper_bound_direction_mismatch_count;
+        static_upper_bound_route_endpoint_unavailable_count +=
+            other.static_upper_bound_route_endpoint_unavailable_count;
         reverse_lower_bound_source_invalid += other.reverse_lower_bound_source_invalid;
         queue_exhausted_without_target += other.queue_exhausted_without_target;
         pruned_by_initial_upper_bound += other.pruned_by_initial_upper_bound;
@@ -95,6 +149,18 @@ struct TemporalAsymmetricSearchDiagnostics
             max_initial_upper_bound_prune_margin =
                 std::max(max_initial_upper_bound_prune_margin,
                          other.max_initial_upper_bound_prune_margin);
+        }
+        if (first_static_upper_bound_mismatch_directed_source_node < 0 &&
+            other.first_static_upper_bound_mismatch_directed_source_node >= 0)
+        {
+            first_static_upper_bound_mismatch_directed_source_node =
+                other.first_static_upper_bound_mismatch_directed_source_node;
+            first_static_upper_bound_mismatch_directed_target_node =
+                other.first_static_upper_bound_mismatch_directed_target_node;
+            first_static_upper_bound_mismatch_route_source_node =
+                other.first_static_upper_bound_mismatch_route_source_node;
+            first_static_upper_bound_mismatch_route_target_node =
+                other.first_static_upper_bound_mismatch_route_target_node;
         }
     }
 };

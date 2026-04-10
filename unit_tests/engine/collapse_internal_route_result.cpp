@@ -163,4 +163,22 @@ BOOST_AUTO_TEST_CASE(two_legs_to_two_legs)
     BOOST_CHECK_EQUAL(collapsed.unpacked_path_segments[1][1].turn_via_node, 3);
 }
 
+BOOST_AUTO_TEST_CASE(temporal_asymmetric_diagnostics_record_static_upper_bound_direction_checks)
+{
+    TemporalAsymmetricSearchDiagnostics diagnostics;
+
+    diagnostics.RecordStaticUpperBoundDirectionCheck(NodeID{10}, NodeID{20}, NodeID{10}, NodeID{20});
+    diagnostics.RecordStaticUpperBoundDirectionCheck(NodeID{10}, NodeID{20}, NodeID{11}, NodeID{20});
+    diagnostics.RecordStaticUpperBoundDirectionCheck(NodeID{10}, NodeID{20}, NodeID{10}, NodeID{21});
+
+    BOOST_CHECK_EQUAL(diagnostics.static_upper_bound_pair_match_count, 1);
+    BOOST_CHECK_EQUAL(diagnostics.static_upper_bound_source_mismatch_count, 1);
+    BOOST_CHECK_EQUAL(diagnostics.static_upper_bound_target_mismatch_count, 1);
+    BOOST_CHECK_EQUAL(diagnostics.static_upper_bound_direction_mismatch_count, 2);
+    BOOST_CHECK_EQUAL(diagnostics.first_static_upper_bound_mismatch_directed_source_node, 10);
+    BOOST_CHECK_EQUAL(diagnostics.first_static_upper_bound_mismatch_directed_target_node, 20);
+    BOOST_CHECK_EQUAL(diagnostics.first_static_upper_bound_mismatch_route_source_node, 11);
+    BOOST_CHECK_EQUAL(diagnostics.first_static_upper_bound_mismatch_route_target_node, 20);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
