@@ -98,28 +98,16 @@ class RouteAPI : public BaseAPI
                  util::json::Object &response) const
     {
         util::json::Array jsRoutes;
-        std::optional<TemporalRouteEvaluationDiagnostics> temporal_route_diagnostics;
-        if (parameters.temporal_debug && parameters.departure_timestamp)
-        {
-            temporal_route_diagnostics.emplace();
-        }
 
         for (const auto &route : raw_routes.routes)
         {
             if (!route.is_valid())
                 continue;
 
-            TemporalRouteEvaluationDiagnostics route_diagnostics;
             jsRoutes.values.push_back(MakeRoute(route.leg_endpoints,
                                                 route.unpacked_path_segments,
                                                 route.source_traversed_in_reverse,
-                                                route.target_traversed_in_reverse,
-                                                temporal_route_diagnostics ? &route_diagnostics
-                                                                           : nullptr));
-            if (temporal_route_diagnostics)
-            {
-                temporal_route_diagnostics->Merge(route_diagnostics);
-            }
+                                                route.target_traversed_in_reverse));
         }
 
         if (!parameters.skip_waypoints)
@@ -133,145 +121,9 @@ class RouteAPI : public BaseAPI
         {
             response.values.emplace("data_version", data_timestamp);
         }
-
-        if (parameters.temporal_debug)
-        {
-            AddTemporalDebug(raw_routes, temporal_route_diagnostics, response);
-        }
     }
 
   protected:
-    static util::json::Object
-    MakeTemporalAsymmetricDebug(const TemporalAsymmetricSearchDiagnostics &diagnostics)
-    {
-        util::json::Object debug;
-        debug.values.emplace("endpoint_pairs_tried",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.endpoint_pairs_tried)});
-        debug.values.emplace("endpoint_pairs_with_static_upper_bound",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.endpoint_pairs_with_static_upper_bound)});
-        debug.values.emplace("static_upper_bound_pair_match_count",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.static_upper_bound_pair_match_count)});
-        debug.values.emplace("static_upper_bound_source_mismatch_count",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.static_upper_bound_source_mismatch_count)});
-        debug.values.emplace("static_upper_bound_target_mismatch_count",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.static_upper_bound_target_mismatch_count)});
-        debug.values.emplace("static_upper_bound_direction_mismatch_count",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.static_upper_bound_direction_mismatch_count)});
-        debug.values.emplace("static_upper_bound_route_endpoint_unavailable_count",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.static_upper_bound_route_endpoint_unavailable_count)});
-        debug.values.emplace("first_static_upper_bound_mismatch_directed_source_node",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.first_static_upper_bound_mismatch_directed_source_node)});
-        debug.values.emplace("first_static_upper_bound_mismatch_directed_target_node",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.first_static_upper_bound_mismatch_directed_target_node)});
-        debug.values.emplace("first_static_upper_bound_mismatch_route_source_node",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.first_static_upper_bound_mismatch_route_source_node)});
-        debug.values.emplace("first_static_upper_bound_mismatch_route_target_node",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.first_static_upper_bound_mismatch_route_target_node)});
-        debug.values.emplace("reverse_lower_bound_source_invalid",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.reverse_lower_bound_source_invalid)});
-        debug.values.emplace("queue_exhausted_without_target",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.queue_exhausted_without_target)});
-        debug.values.emplace("pruned_by_initial_upper_bound",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.pruned_by_initial_upper_bound)});
-        debug.values.emplace("pruned_by_best_upper_bound",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.pruned_by_best_upper_bound)});
-        debug.values.emplace("invalid_duration_relaxations",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.invalid_duration_relaxations)});
-        debug.values.emplace("target_reached",
-                             util::json::Number{static_cast<double>(diagnostics.target_reached)});
-        debug.values.emplace("best_candidate_rejected",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.best_candidate_rejected)});
-        debug.values.emplace("expanded_nodes",
-                             util::json::Number{static_cast<double>(diagnostics.expanded_nodes)});
-        debug.values.emplace("relaxation_attempts",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.relaxation_attempts)});
-        debug.values.emplace("relaxation_improvements",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.relaxation_improvements)});
-        debug.values.emplace("source_first_pop_pruned_by_initial_upper_bound",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.source_first_pop_pruned_by_initial_upper_bound)});
-        debug.values.emplace("min_initial_upper_bound_prune_margin",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.MinInitialUpperBoundPruneMarginOrSentinel())});
-        debug.values.emplace("max_initial_upper_bound_prune_margin",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.MaxInitialUpperBoundPruneMarginOrSentinel())});
-        return debug;
-    }
-
-    static void AddTemporalRouteDebug(util::json::Object &debug,
-                                      const TemporalRouteEvaluationDiagnostics &diagnostics)
-    {
-        debug.values.emplace("route_geometries_with_temporal_profiles",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.route_geometries_with_temporal_profiles)});
-        debug.values.emplace("route_geometries_missing_temporal_profiles",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.route_geometries_missing_temporal_profiles)});
-        debug.values.emplace("route_plausibility_rejections",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.route_plausibility_rejections)});
-        debug.values.emplace("route_steps_used_temporal",
-                             util::json::Number{static_cast<double>(
-                                 diagnostics.route_steps_used_temporal)});
-    }
-
-    static void AddTemporalDebug(
-        const InternalManyRoutesResult &raw_routes,
-        const std::optional<TemporalRouteEvaluationDiagnostics> &temporal_route_diagnostics,
-        util::json::Object &response)
-    {
-        TemporalAsymmetricSearchDiagnostics merged;
-        bool has_search_diagnostics = false;
-
-        for (const auto &route : raw_routes.routes)
-        {
-            if (!route.temporal_asymmetric_debug)
-            {
-                continue;
-            }
-
-            merged.Merge(*route.temporal_asymmetric_debug);
-            has_search_diagnostics = true;
-        }
-
-        if (!has_search_diagnostics && !temporal_route_diagnostics)
-        {
-            return;
-        }
-
-        util::json::Object debug;
-        if (has_search_diagnostics)
-        {
-            debug = MakeTemporalAsymmetricDebug(merged);
-        }
-
-        if (temporal_route_diagnostics)
-        {
-            AddTemporalRouteDebug(debug, *temporal_route_diagnostics);
-        }
-
-        response.values.emplace("temporal_debug", std::move(debug));
-    }
 
     template <typename GetWptsFn>
     std::unique_ptr<fbresult::FBResultBuilder>
@@ -887,15 +739,12 @@ class RouteAPI : public BaseAPI
     util::json::Object MakeRoute(const std::vector<PhantomEndpoints> &leg_endpoints,
                                  const std::vector<std::vector<PathData>> &unpacked_path_segments,
                                  const std::vector<bool> &source_traversed_in_reverse,
-                                 const std::vector<bool> &target_traversed_in_reverse,
-                                 TemporalRouteEvaluationDiagnostics *temporal_route_diagnostics =
-                                     nullptr) const
+                                 const std::vector<bool> &target_traversed_in_reverse) const
     {
         auto legs_info = MakeLegs(leg_endpoints,
                                   unpacked_path_segments,
                                   source_traversed_in_reverse,
-                                  target_traversed_in_reverse,
-                                  temporal_route_diagnostics);
+                                  target_traversed_in_reverse);
         std::vector<guidance::RouteLeg> &legs = legs_info.first;
         std::vector<guidance::LegGeometry> &leg_geometries = legs_info.second;
 
@@ -1075,8 +924,7 @@ class RouteAPI : public BaseAPI
     MakeLegs(const std::vector<PhantomEndpoints> &leg_endpoints,
              const std::vector<std::vector<PathData>> &unpacked_path_segments,
              const std::vector<bool> &source_traversed_in_reverse,
-             const std::vector<bool> &target_traversed_in_reverse,
-             TemporalRouteEvaluationDiagnostics *temporal_route_diagnostics = nullptr) const
+             const std::vector<bool> &target_traversed_in_reverse) const
     {
         auto result =
             std::make_pair(std::vector<guidance::RouteLeg>(), std::vector<guidance::LegGeometry>());
@@ -1117,10 +965,6 @@ class RouteAPI : public BaseAPI
                 source_phantom = std::move(temporal_leg.source_phantom);
                 target_phantom = std::move(temporal_leg.target_phantom);
                 current_departure_timestamp_ds = temporal_leg.arrival_timestamp_ds;
-                if (temporal_route_diagnostics)
-                {
-                    temporal_route_diagnostics->Merge(temporal_leg.diagnostics);
-                }
             }
 
             auto leg = guidance::assembleLeg(facade,

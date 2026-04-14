@@ -233,9 +233,8 @@ BOOST_AUTO_TEST_CASE(search_does_not_prune_against_initial_upper_bound_before_ex
     const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
         &target_phantom, 2, false};
 
-    engine::TemporalAsymmetricSearchDiagnostics diagnostics;
     const auto result = engine::routing_algorithms::mld::temporal::Search(
-        facade, source, target, std::time_t{1735689600}, EdgeDuration{29}, &diagnostics);
+        facade, source, target, std::time_t{1735689600}, EdgeDuration{29});
 
     BOOST_REQUIRE(result.is_valid());
     BOOST_CHECK_EQUAL(from_alias<std::int32_t>(result.total_duration), 30);
@@ -243,9 +242,6 @@ BOOST_AUTO_TEST_CASE(search_does_not_prune_against_initial_upper_bound_before_ex
     BOOST_CHECK_EQUAL(result.nodes[0], 0);
     BOOST_CHECK_EQUAL(result.nodes[1], 1);
     BOOST_CHECK_EQUAL(result.nodes[2], 2);
-    BOOST_CHECK_EQUAL(diagnostics.pruned_by_initial_upper_bound, 0);
-    BOOST_CHECK_EQUAL(diagnostics.source_first_pop_pruned_by_initial_upper_bound, 0);
-    BOOST_CHECK_EQUAL(diagnostics.target_reached, 1);
 }
 
 BOOST_AUTO_TEST_CASE(search_ignores_negative_initial_upper_bound)

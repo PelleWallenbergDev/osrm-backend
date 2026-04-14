@@ -161,10 +161,6 @@ BOOST_AUTO_TEST_CASE(evaluate_route_accumulates_temporal_leg_durations)
     BOOST_CHECK_EQUAL(evaluation.arrival_timestamp, std::time_t{345650});
     BOOST_CHECK_EQUAL(evaluation.arrival_timestamp_ds,
                       osrm::engine::temporal::ToTemporalClock(std::time_t{345600}) + 500);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_geometries_with_temporal_profiles, 2U);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_geometries_missing_temporal_profiles, 0U);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_plausibility_rejections, 0U);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_steps_used_temporal, 2U);
 }
 
 BOOST_AUTO_TEST_CASE(implausible_temporal_geometry_duration_falls_back_to_static)
@@ -200,26 +196,6 @@ BOOST_AUTO_TEST_CASE(evaluate_route_does_not_emit_negative_duration_for_implausi
     BOOST_CHECK_EQUAL(from_alias<std::int32_t>(evaluation.total_duration), 100);
     BOOST_CHECK_EQUAL(evaluation.arrival_timestamp_ds,
                       osrm::engine::temporal::ToTemporalClock(std::time_t{345600}) + 100);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_geometries_with_temporal_profiles, 1U);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_geometries_missing_temporal_profiles, 0U);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_plausibility_rejections, 1U);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_steps_used_temporal, 0U);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_route_reports_missing_temporal_profiles)
-{
-    FakeTemporalFacade facade;
-    facade.forward_temporal.clear();
-
-    const auto route = MakeRoute(7, 11, EdgeDuration{40});
-    const auto evaluation = osrm::engine::temporal::EvaluateRoute(facade, route, std::time_t{345600});
-
-    BOOST_CHECK(!evaluation.used_temporal);
-    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(evaluation.total_duration), 100);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_geometries_with_temporal_profiles, 0U);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_geometries_missing_temporal_profiles, 1U);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_plausibility_rejections, 0U);
-    BOOST_CHECK_EQUAL(evaluation.diagnostics.route_steps_used_temporal, 0U);
 }
 
 BOOST_AUTO_TEST_CASE(proportional_scaling_rejects_overflow)

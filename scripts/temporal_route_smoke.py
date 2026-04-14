@@ -30,38 +30,6 @@ import urllib.parse
 
 DEFAULT_THESSALONIKI_BBOX = (22.90, 40.58, 23.02, 40.70)
 THREAD_LOCAL = threading.local()
-TEMPORAL_ROUTE_DEBUG_FIELDS = [
-    "route_geometries_with_temporal_profiles",
-    "route_geometries_missing_temporal_profiles",
-    "route_plausibility_rejections",
-    "route_steps_used_temporal",
-]
-TEMPORAL_ASYM_SEARCH_DEBUG_FIELDS = [
-    "endpoint_pairs_tried",
-    "endpoint_pairs_with_static_upper_bound",
-    "static_upper_bound_pair_match_count",
-    "static_upper_bound_source_mismatch_count",
-    "static_upper_bound_target_mismatch_count",
-    "static_upper_bound_direction_mismatch_count",
-    "static_upper_bound_route_endpoint_unavailable_count",
-    "first_static_upper_bound_mismatch_directed_source_node",
-    "first_static_upper_bound_mismatch_directed_target_node",
-    "first_static_upper_bound_mismatch_route_source_node",
-    "first_static_upper_bound_mismatch_route_target_node",
-    "reverse_lower_bound_source_invalid",
-    "queue_exhausted_without_target",
-    "pruned_by_initial_upper_bound",
-    "pruned_by_best_upper_bound",
-    "invalid_duration_relaxations",
-    "target_reached",
-    "best_candidate_rejected",
-    "expanded_nodes",
-    "relaxation_attempts",
-    "relaxation_improvements",
-    "source_first_pop_pruned_by_initial_upper_bound",
-    "min_initial_upper_bound_prune_margin",
-    "max_initial_upper_bound_prune_margin",
-]
 
 
 class ThreadLocalHTTPSession:
@@ -173,7 +141,7 @@ def open_json(url, timeout, pool_size):
         return 0, {"code": "TransportError", "message": str(error)}, elapsed_ms
 
 
-def route_url(host, start, target, departure, mode, temporal_debug):
+def route_url(host, start, target, departure, mode):
     coordinates = f"{start[0]:.7f},{start[1]:.7f};{target[0]:.7f},{target[1]:.7f}"
     params = {
         "overview": "full",
@@ -182,8 +150,6 @@ def route_url(host, start, target, departure, mode, temporal_debug):
     }
     if departure is not None:
         params["depart_at"] = str(departure)
-    if temporal_debug:
-        params["temporal_debug"] = "true"
     if mode == "asymmetric":
         params["temporal_mode"] = "asymmetric"
 
@@ -195,11 +161,9 @@ def nearest_url(host, coord):
     return f"{host.rstrip('/')}/nearest/v1/driving/{coord[0]:.7f},{coord[1]:.7f}?{params}"
 
 
-def route(
-    host, start, target, timeout, pool_size, departure=None, mode="static", temporal_debug=False
-):
+def route(host, start, target, timeout, pool_size, departure=None, mode="static"):
     status, payload, elapsed_ms = open_json(
-        route_url(host, start, target, departure, mode, temporal_debug), timeout, pool_size
+        route_url(host, start, target, departure, mode), timeout, pool_size
     )
     code = payload.get("code", "MissingCode")
     result = {
@@ -210,7 +174,6 @@ def route(
         "duration": None,
         "distance": None,
         "geometry": None,
-        "temporal_debug": payload.get("temporal_debug", {}),
     }
 
     if code == "Ok" and payload.get("routes"):
@@ -340,9 +303,6 @@ def write_csv_header(writer):
             "static_ms",
             "depart_ms",
             "asymmetric_ms",
-            *[f"depart_debug_{field}" for field in TEMPORAL_ROUTE_DEBUG_FIELDS],
-            *[f"asym_route_debug_{field}" for field in TEMPORAL_ROUTE_DEBUG_FIELDS],
-            *[f"asym_debug_{field}" for field in TEMPORAL_ASYM_SEARCH_DEBUG_FIELDS],
         ]
     )
 
@@ -382,18 +342,6 @@ def write_csv_row(
             f"{static['elapsed_ms']:.2f}",
             f"{depart['elapsed_ms']:.2f}",
             f"{asymmetric['elapsed_ms']:.2f}",
-            *[
-                depart["temporal_debug"].get(field)
-                for field in TEMPORAL_ROUTE_DEBUG_FIELDS
-            ],
-            *[
-                asymmetric["temporal_debug"].get(field)
-                for field in TEMPORAL_ROUTE_DEBUG_FIELDS
-            ],
-            *[
-                asymmetric["temporal_debug"].get(field)
-                for field in TEMPORAL_ASYM_SEARCH_DEBUG_FIELDS
-            ],
         ]
     )
 
@@ -412,15 +360,7 @@ def process_pair(args, index, start, target, departure):
         start, target = snapped_start, snapped_target
 
     static = route(args.host, start, target, args.timeout, args.workers)
-    depart = route(
-        args.host,
-        start,
-        target,
-        args.timeout,
-        args.workers,
-        departure,
-        temporal_debug=args.temporal_debug,
-    )
+    depart = route(args.host, start, target, args.timeout, args.workers, departure)
     asymmetric = route(
         args.host,
         start,
@@ -429,7 +369,6 @@ def process_pair(args, index, start, target, departure):
         args.workers,
         departure,
         mode="asymmetric",
-        temporal_debug=args.temporal_debug,
     )
 
     depart_effect = differs(static, depart, args.duration_tolerance)
@@ -612,12 +551,6 @@ def main():
     )
     parser.add_argument("--output-csv", help="Optional per-request result CSV path.")
     parser.add_argument("--progress-every", type=int, default=10)
-    parser.add_argument(
-        "--temporal-debug",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Request temporal asymmetric search diagnostics and export them to CSV.",
-    )
     parser.add_argument(
         "--min-temporal-effects",
         type=int,

@@ -11,123 +11,10 @@
 
 #include <algorithm>
 #include <string>
-#include <variant>
 #include <vector>
 
 namespace osrm::engine::plugins
 {
-namespace
-{
-util::json::Object
-MakeTemporalAsymmetricDebug(const TemporalAsymmetricSearchDiagnostics &diagnostics)
-{
-    util::json::Object debug;
-    debug.values.emplace("endpoint_pairs_tried",
-                         util::json::Number{
-                             static_cast<double>(diagnostics.endpoint_pairs_tried)});
-    debug.values.emplace("endpoint_pairs_with_static_upper_bound",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.endpoint_pairs_with_static_upper_bound)});
-    debug.values.emplace("static_upper_bound_pair_match_count",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.static_upper_bound_pair_match_count)});
-    debug.values.emplace("static_upper_bound_source_mismatch_count",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.static_upper_bound_source_mismatch_count)});
-    debug.values.emplace("static_upper_bound_target_mismatch_count",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.static_upper_bound_target_mismatch_count)});
-    debug.values.emplace("static_upper_bound_direction_mismatch_count",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.static_upper_bound_direction_mismatch_count)});
-    debug.values.emplace("static_upper_bound_route_endpoint_unavailable_count",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.static_upper_bound_route_endpoint_unavailable_count)});
-    debug.values.emplace("first_static_upper_bound_mismatch_directed_source_node",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.first_static_upper_bound_mismatch_directed_source_node)});
-    debug.values.emplace("first_static_upper_bound_mismatch_directed_target_node",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.first_static_upper_bound_mismatch_directed_target_node)});
-    debug.values.emplace("first_static_upper_bound_mismatch_route_source_node",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.first_static_upper_bound_mismatch_route_source_node)});
-    debug.values.emplace("first_static_upper_bound_mismatch_route_target_node",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.first_static_upper_bound_mismatch_route_target_node)});
-    debug.values.emplace("reverse_lower_bound_source_invalid",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.reverse_lower_bound_source_invalid)});
-    debug.values.emplace("queue_exhausted_without_target",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.queue_exhausted_without_target)});
-    debug.values.emplace("pruned_by_initial_upper_bound",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.pruned_by_initial_upper_bound)});
-    debug.values.emplace("pruned_by_best_upper_bound",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.pruned_by_best_upper_bound)});
-    debug.values.emplace("invalid_duration_relaxations",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.invalid_duration_relaxations)});
-    debug.values.emplace("target_reached",
-                         util::json::Number{static_cast<double>(diagnostics.target_reached)});
-    debug.values.emplace("best_candidate_rejected",
-                         util::json::Number{
-                             static_cast<double>(diagnostics.best_candidate_rejected)});
-    debug.values.emplace("expanded_nodes",
-                         util::json::Number{static_cast<double>(diagnostics.expanded_nodes)});
-    debug.values.emplace("relaxation_attempts",
-                         util::json::Number{
-                             static_cast<double>(diagnostics.relaxation_attempts)});
-    debug.values.emplace("relaxation_improvements",
-                         util::json::Number{
-                             static_cast<double>(diagnostics.relaxation_improvements)});
-    debug.values.emplace("source_first_pop_pruned_by_initial_upper_bound",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.source_first_pop_pruned_by_initial_upper_bound)});
-    debug.values.emplace("min_initial_upper_bound_prune_margin",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.MinInitialUpperBoundPruneMarginOrSentinel())});
-    debug.values.emplace("max_initial_upper_bound_prune_margin",
-                         util::json::Number{static_cast<double>(
-                             diagnostics.MaxInitialUpperBoundPruneMarginOrSentinel())});
-    return debug;
-}
-
-void AddTemporalAsymmetricDebugIfRequested(const api::RouteParameters &route_parameters,
-                                           const InternalManyRoutesResult &routes,
-                                           osrm::engine::api::ResultT &result)
-{
-    if (!route_parameters.temporal_debug)
-    {
-        return;
-    }
-
-    TemporalAsymmetricSearchDiagnostics merged;
-    bool has_diagnostics = false;
-    for (const auto &route : routes.routes)
-    {
-        if (!route.temporal_asymmetric_debug)
-        {
-            continue;
-        }
-
-        merged.Merge(*route.temporal_asymmetric_debug);
-        has_diagnostics = true;
-    }
-
-    if (!has_diagnostics)
-    {
-        return;
-    }
-
-    if (auto *json_result = std::get_if<util::json::Object>(&result))
-    {
-        json_result->values.emplace("temporal_debug", MakeTemporalAsymmetricDebug(merged));
-    }
-}
-} // namespace
 
 ViaRoutePlugin::ViaRoutePlugin(int max_locations_viaroute,
                                int max_alternatives,
@@ -350,15 +237,11 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
 
         if (!all_in_same_component(snapped_phantoms))
         {
-            const auto status = Error("NoRoute", "Impossible route between points", result);
-            AddTemporalAsymmetricDebugIfRequested(route_parameters, routes, result);
-            return status;
+            return Error("NoRoute", "Impossible route between points", result);
         }
         else
         {
-            const auto status = Error("NoRoute", "No route found between points", result);
-            AddTemporalAsymmetricDebugIfRequested(route_parameters, routes, result);
-            return status;
+            return Error("NoRoute", "No route found between points", result);
         }
     }
 

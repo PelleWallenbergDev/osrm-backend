@@ -43,10 +43,7 @@ struct RouteParametersGrammar : public BaseParametersGrammar<Iterator, Signature
             (qi::lit("temporal_mode=") >
              temporal_routing_mode
                  [ph::bind(&engine::api::RouteParameters::temporal_routing_mode, qi::_r1) =
-                      qi::_1]) |
-            (qi::lit("temporal_debug=") >
-             qi::bool_[ph::bind(&engine::api::RouteParameters::temporal_debug, qi::_r1) =
-                            qi::_1]);
+                      qi::_1]);
 
         root_rule = query_rule(qi::_r1) > BaseGrammar::format_rule(qi::_r1) >
                     -('?' > (route_rule(qi::_r1) | base_rule(qi::_r1)) % '&');

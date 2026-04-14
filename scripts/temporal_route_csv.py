@@ -28,32 +28,6 @@ from datetime import datetime, timedelta
 
 
 THREAD_LOCAL = threading.local()
-TEMPORAL_DEBUG_FIELDS = [
-    "endpoint_pairs_tried",
-    "endpoint_pairs_with_static_upper_bound",
-    "static_upper_bound_pair_match_count",
-    "static_upper_bound_source_mismatch_count",
-    "static_upper_bound_target_mismatch_count",
-    "static_upper_bound_direction_mismatch_count",
-    "static_upper_bound_route_endpoint_unavailable_count",
-    "first_static_upper_bound_mismatch_directed_source_node",
-    "first_static_upper_bound_mismatch_directed_target_node",
-    "first_static_upper_bound_mismatch_route_source_node",
-    "first_static_upper_bound_mismatch_route_target_node",
-    "reverse_lower_bound_source_invalid",
-    "queue_exhausted_without_target",
-    "pruned_by_initial_upper_bound",
-    "pruned_by_best_upper_bound",
-    "invalid_duration_relaxations",
-    "target_reached",
-    "best_candidate_rejected",
-    "expanded_nodes",
-    "relaxation_attempts",
-    "relaxation_improvements",
-    "source_first_pop_pruned_by_initial_upper_bound",
-    "min_initial_upper_bound_prune_margin",
-    "max_initial_upper_bound_prune_margin",
-]
 
 day_map = {
     "mon": 0,
@@ -174,7 +148,7 @@ def open_json(url, timeout, pool_size):
         return 0, {"code": "TransportError", "message": str(error)}, elapsed_ms
 
 
-def route_url(host, start, target, departure, mode, temporal_debug):
+def route_url(host, start, target, departure, mode):
     coordinates = f"{start[0]:.7f},{start[1]:.7f};{target[0]:.7f},{target[1]:.7f}"
     params = {
         "overview": "full",
@@ -185,8 +159,6 @@ def route_url(host, start, target, departure, mode, temporal_debug):
         params["depart_at"] = str(departure)
     if mode == "asymmetric":
         params["temporal_mode"] = "asymmetric"
-        if temporal_debug:
-            params["temporal_debug"] = "true"
 
     return f"{host.rstrip('/')}/route/v1/driving/{coordinates}?{urllib.parse.urlencode(params)}"
 
@@ -196,11 +168,9 @@ def nearest_url(host, coord):
     return f"{host.rstrip('/')}/nearest/v1/driving/{coord[0]:.7f},{coord[1]:.7f}?{params}"
 
 
-def route(
-    host, start, target, timeout, pool_size, departure=None, mode="static", temporal_debug=False
-):
+def route(host, start, target, timeout, pool_size, departure=None, mode="static"):
     status, payload, elapsed_ms = open_json(
-        route_url(host, start, target, departure, mode, temporal_debug), timeout, pool_size
+        route_url(host, start, target, departure, mode), timeout, pool_size
     )
     code = payload.get("code", "MissingCode")
     result = {
@@ -211,7 +181,6 @@ def route(
         "duration": None,
         "distance": None,
         "geometry": None,
-        "temporal_debug": payload.get("temporal_debug", {}),
     }
 
     if code == "Ok" and payload.get("routes"):
@@ -309,7 +278,6 @@ def process_pair(args, index, start, target, departure, duration_google_min):
         args.workers,
         departure,
         mode="asymmetric",
-        temporal_debug=args.temporal_debug,
     )
 
     depart_effect = differs(static, depart, args.duration_tolerance)
@@ -433,7 +401,6 @@ def main():
     parser.add_argument("--duration-tolerance", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--output-csv", help="Output CSV file for results")
-    parser.add_argument("--temporal-debug", action="store_true", help="Enable temporal debug output")
     parser.add_argument("--fail-on-asymmetric-noroute", action="store_true")
     parser.add_argument("--min-temporal-effects", type=int, default=0)
 

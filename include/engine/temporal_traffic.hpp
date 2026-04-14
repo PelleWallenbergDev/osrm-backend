@@ -48,8 +48,6 @@ struct TemporalGeometryDuration
     std::uint32_t week_bucket = 0;
     EdgeDuration duration = EdgeDuration{0};
     bool used_temporal = false;
-    bool has_temporal_profile = false;
-    bool plausibility_rejected = false;
 };
 
 struct TemporalLegEvaluation
@@ -60,7 +58,6 @@ struct TemporalLegEvaluation
     std::time_t arrival_timestamp = 0;
     TemporalClock arrival_timestamp_ds = 0;
     bool used_temporal = false;
-    TemporalRouteEvaluationDiagnostics diagnostics;
 };
 
 struct TemporalRouteEvaluation
@@ -69,7 +66,6 @@ struct TemporalRouteEvaluation
     std::time_t arrival_timestamp = 0;
     TemporalClock arrival_timestamp_ds = 0;
     bool used_temporal = false;
-    TemporalRouteEvaluationDiagnostics diagnostics;
 };
 
 namespace detail
@@ -192,33 +188,6 @@ inline EdgeDuration ScaleDurationProportionally(const EdgeDuration value,
     const auto scaled_value =
         std::llround(static_cast<long double>(value_raw) * scaled_total_raw / static_total_raw);
     return DurationOrInvalid(scaled_value);
-}
-
-inline void RecordTemporalGeometryLookup(TemporalRouteEvaluationDiagnostics &diagnostics,
-                                         const TemporalGeometryDuration &geometry_duration)
-{
-    if (geometry_duration.has_temporal_profile)
-    {
-        ++diagnostics.route_geometries_with_temporal_profiles;
-    }
-    else
-    {
-        ++diagnostics.route_geometries_missing_temporal_profiles;
-    }
-
-    if (geometry_duration.plausibility_rejected)
-    {
-        ++diagnostics.route_plausibility_rejections;
-    }
-}
-
-inline void RecordTemporalStepUsage(TemporalRouteEvaluationDiagnostics &diagnostics,
-                                    const bool used_temporal)
-{
-    if (used_temporal)
-    {
-        ++diagnostics.route_steps_used_temporal;
-    }
 }
 
 inline std::vector<EdgeDuration> ScaleDurationsToTotal(const std::vector<EdgeDuration> &durations,
@@ -422,9 +391,6 @@ TemporalGeometryDuration GetGeometryDurationAtClock(const FacadeT &facade,
 {
     TemporalGeometryDuration result;
     result.duration = GetStaticGeometryDuration(facade, geometry_id, forward);
-    result.has_temporal_profile =
-        forward ? facade.HasTemporalForwardProfile(geometry_id)
-                : facade.HasTemporalReverseProfile(geometry_id);
 
     const auto bucket_size_minutes = facade.GetTemporalBucketSizeMinutes();
     const auto week_bucket_count = facade.GetTemporalWeekBucketCount();
@@ -437,11 +403,6 @@ TemporalGeometryDuration GetGeometryDurationAtClock(const FacadeT &facade,
         std::min(TimestampToWeekBucketFromClock(timestamp_ds, bucket_size_minutes),
                  week_bucket_count - 1);
 
-    if (!result.has_temporal_profile)
-    {
-        return result;
-    }
-
     const auto temporal_duration =
         forward ? facade.GetTemporalForwardDuration(geometry_id, result.week_bucket)
                 : facade.GetTemporalReverseDuration(geometry_id, result.week_bucket);
@@ -452,10 +413,6 @@ TemporalGeometryDuration GetGeometryDurationAtClock(const FacadeT &facade,
         {
             result.duration = temporal_duration;
             result.used_temporal = true;
-        }
-        else
-        {
-            result.plausibility_rejected = true;
         }
     }
 
@@ -502,7 +459,6 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
         const auto source_geometry = facade.GetGeometryIndex(source_node_id);
         const auto geometry_duration = GetGeometryDurationAtClock(
             facade, source_geometry.id, source_geometry.forward, evaluation.arrival_timestamp_ds);
-        detail::RecordTemporalGeometryLookup(evaluation.diagnostics, geometry_duration);
         const auto static_total =
             GetStaticGeometryDuration(facade, source_geometry.id, source_geometry.forward);
 
@@ -538,7 +494,6 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
                                              adjusted_source_duration));
         evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
         evaluation.used_temporal = geometry_duration.used_temporal;
-        detail::RecordTemporalStepUsage(evaluation.diagnostics, evaluation.used_temporal);
         return evaluation;
     }
 
@@ -557,7 +512,6 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
             facade.GetGeometryIndex(evaluation.path_data[group_begin].from_edge_based_node);
         const auto geometry_duration = GetGeometryDurationAtClock(
             facade, geometry_index.id, geometry_index.forward, evaluation.arrival_timestamp_ds);
-        detail::RecordTemporalGeometryLookup(evaluation.diagnostics, geometry_duration);
         const auto static_total =
             GetStaticGeometryDuration(facade, geometry_index.id, geometry_index.forward);
 
@@ -647,7 +601,6 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
             AdvanceTemporalClock(evaluation.arrival_timestamp_ds, traversed_duration);
         evaluation.arrival_timestamp = ToTimestamp(evaluation.arrival_timestamp_ds);
         evaluation.used_temporal = evaluation.used_temporal || group_uses_temporal;
-        detail::RecordTemporalStepUsage(evaluation.diagnostics, group_uses_temporal);
         group_begin = group_end;
     }
 
@@ -655,7 +608,6 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
     {
         const auto geometry_duration = GetGeometryDurationAtClock(
             facade, target_geometry.id, target_geometry.forward, evaluation.arrival_timestamp_ds);
-        detail::RecordTemporalGeometryLookup(evaluation.diagnostics, geometry_duration);
         const auto static_total =
             GetStaticGeometryDuration(facade, target_geometry.id, target_geometry.forward);
         const auto adjusted_target_duration = detail::ScaleDurationProportionally(
@@ -672,7 +624,6 @@ TemporalLegEvaluation EvaluateRouteLegAtClock(const FacadeT &facade,
         const auto target_used_temporal =
             geometry_duration.used_temporal && adjusted_target_duration != INVALID_EDGE_DURATION;
         evaluation.used_temporal = evaluation.used_temporal || target_used_temporal;
-        detail::RecordTemporalStepUsage(evaluation.diagnostics, target_used_temporal);
     }
 
     return evaluation;
@@ -768,7 +719,6 @@ TemporalRouteEvaluation EvaluateRoute(const FacadeT &facade,
         evaluation.arrival_timestamp = leg_evaluation.arrival_timestamp;
         evaluation.arrival_timestamp_ds = leg_evaluation.arrival_timestamp_ds;
         evaluation.used_temporal = evaluation.used_temporal || leg_evaluation.used_temporal;
-        evaluation.diagnostics.Merge(leg_evaluation.diagnostics);
     }
 
     return evaluation;
