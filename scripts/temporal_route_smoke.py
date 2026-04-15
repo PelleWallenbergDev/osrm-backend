@@ -2,17 +2,18 @@
 """
 Smoke-test temporal OSRM route behavior over many coordinate pairs.
 
-The script compares three requests for each sampled pair:
+The script compares four requests for each sampled pair:
 
   1. static route
   2. depart_at route, which temporalizes durations on the selected route
   3. depart_at + temporal_mode=asymmetric, which uses the experimental
      asymmetric temporal search path
+  4. depart_at + temporal_mode=overlay_asymmetric, which uses the
+     clique-backed temporal overlay search path
 
 It classifies pairs as temporal-effect or no-temporal-effect by comparing
 duration and geometry against the static baseline, and it flags the important
-regression where static routing succeeds but asymmetric temporal routing returns
-NoRoute.
+regressions where static routing succeeds but temporal routing returns NoRoute.
 """
 
 import argparse
@@ -150,8 +151,8 @@ def route_url(host, start, target, departure, mode):
     }
     if departure is not None:
         params["depart_at"] = str(departure)
-    if mode == "asymmetric":
-        params["temporal_mode"] = "asymmetric"
+    if mode in {"asymmetric", "overlay_asymmetric"}:
+        params["temporal_mode"] = mode
 
     return f"{host.rstrip('/')}/route/v1/driving/{coordinates}?{urllib.parse.urlencode(params)}"
 
@@ -290,19 +291,27 @@ def write_csv_header(writer):
             "static_code",
             "depart_code",
             "asymmetric_code",
+            "overlay_code",
             "static_duration_seconds",
             "static_duration_minutes",
             "depart_duration_seconds",
             "depart_duration_minutes",
             "asymmetric_duration_seconds",
             "asymmetric_duration_minutes",
+            "overlay_duration_seconds",
+            "overlay_duration_minutes",
             "depart_effect",
             "asymmetric_effect",
+            "overlay_effect",
             "static_ok_asymmetric_failed",
+            "static_ok_overlay_failed",
+            "asymmetric_ok_overlay_failed",
             "asymmetric_message",
+            "overlay_message",
             "static_ms",
             "depart_ms",
             "asymmetric_ms",
+            "overlay_ms",
         ]
     )
 
@@ -313,10 +322,52 @@ def seconds_to_minutes(value):
     return value / 60.0
 
 
+def percentile(values, ratio):
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+
+    position = (len(values) - 1) * ratio
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return values[lower]
+
+    weight = position - lower
+    return values[lower] * (1.0 - weight) + values[upper] * weight
+
+
+def compute_latency_stats(values):
+    if not values:
+        return None
+
+    ordered = sorted(values)
+    return {
+        "count": len(ordered),
+        "mean": sum(ordered) / len(ordered),
+        "median": percentile(ordered, 0.5),
+        "p95": percentile(ordered, 0.95),
+    }
+
+
 def write_csv_row(
-    writer, index, start, target, departure, static, depart, asymmetric, depart_effect, asym_effect
+    writer,
+    index,
+    start,
+    target,
+    departure,
+    static,
+    depart,
+    asymmetric,
+    overlay,
+    depart_effect,
+    asym_effect,
+    overlay_effect,
 ):
     static_ok_asym_failed = static["code"] == "Ok" and asymmetric["code"] != "Ok"
+    static_ok_overlay_failed = static["code"] == "Ok" and overlay["code"] != "Ok"
+    asymmetric_ok_overlay_failed = asymmetric["code"] == "Ok" and overlay["code"] != "Ok"
     writer.writerow(
         [
             index,
@@ -329,19 +380,27 @@ def write_csv_row(
             static["code"],
             depart["code"],
             asymmetric["code"],
+            overlay["code"],
             static["duration"],
             seconds_to_minutes(static["duration"]),
             depart["duration"],
             seconds_to_minutes(depart["duration"]),
             asymmetric["duration"],
             seconds_to_minutes(asymmetric["duration"]),
+            overlay["duration"],
+            seconds_to_minutes(overlay["duration"]),
             int(depart_effect),
             int(asym_effect),
+            int(overlay_effect),
             int(static_ok_asym_failed),
+            int(static_ok_overlay_failed),
+            int(asymmetric_ok_overlay_failed),
             asymmetric["message"],
+            overlay["message"],
             f"{static['elapsed_ms']:.2f}",
             f"{depart['elapsed_ms']:.2f}",
             f"{asymmetric['elapsed_ms']:.2f}",
+            f"{overlay['elapsed_ms']:.2f}",
         ]
     )
 
@@ -370,9 +429,19 @@ def process_pair(args, index, start, target, departure):
         departure,
         mode="asymmetric",
     )
+    overlay = route(
+        args.host,
+        start,
+        target,
+        args.timeout,
+        args.workers,
+        departure,
+        mode="overlay_asymmetric",
+    )
 
     depart_effect = differs(static, depart, args.duration_tolerance)
     asym_effect = differs(static, asymmetric, args.duration_tolerance)
+    overlay_effect = differs(static, overlay, args.duration_tolerance)
 
     return {
         "index": index,
@@ -383,8 +452,10 @@ def process_pair(args, index, start, target, departure):
         "static": static,
         "depart": depart,
         "asymmetric": asymmetric,
+        "overlay": overlay,
         "depart_effect": depart_effect,
         "asymmetric_effect": asym_effect,
+        "overlay_effect": overlay_effect,
     }
 
 
@@ -402,11 +473,27 @@ def run(args):
         "static_ok": 0,
         "depart_ok": 0,
         "asymmetric_ok": 0,
+        "overlay_ok": 0,
         "depart_effect": 0,
         "asymmetric_effect": 0,
+        "overlay_effect": 0,
         "no_temporal_effect": 0,
         "static_ok_asymmetric_failed": 0,
+        "static_ok_overlay_failed": 0,
+        "asymmetric_ok_overlay_failed": 0,
         "snap_failed": 0,
+    }
+    latencies = {
+        "static": [],
+        "depart": [],
+        "asymmetric": [],
+        "overlay": [],
+    }
+    ok_latencies = {
+        "static": [],
+        "depart": [],
+        "asymmetric": [],
+        "overlay": [],
     }
 
     try:
@@ -445,25 +532,49 @@ def run(args):
                 static = result["static"]
                 depart = result["depart"]
                 asymmetric = result["asymmetric"]
+                overlay = result["overlay"]
                 depart_effect = result["depart_effect"]
                 asym_effect = result["asymmetric_effect"]
+                overlay_effect = result["overlay_effect"]
 
                 counters["sampled"] += 1
                 counters["static_ok"] += int(static["code"] == "Ok")
                 counters["depart_ok"] += int(depart["code"] == "Ok")
                 counters["asymmetric_ok"] += int(asymmetric["code"] == "Ok")
+                counters["overlay_ok"] += int(overlay["code"] == "Ok")
                 counters["depart_effect"] += int(depart_effect)
                 counters["asymmetric_effect"] += int(asym_effect)
+                counters["overlay_effect"] += int(overlay_effect)
                 counters["no_temporal_effect"] += int(
                     static["code"] == "Ok"
                     and depart["code"] == "Ok"
                     and asymmetric["code"] == "Ok"
+                    and overlay["code"] == "Ok"
                     and not depart_effect
                     and not asym_effect
+                    and not overlay_effect
                 )
                 counters["static_ok_asymmetric_failed"] += int(
                     static["code"] == "Ok" and asymmetric["code"] != "Ok"
                 )
+                counters["static_ok_overlay_failed"] += int(
+                    static["code"] == "Ok" and overlay["code"] != "Ok"
+                )
+                counters["asymmetric_ok_overlay_failed"] += int(
+                    asymmetric["code"] == "Ok" and overlay["code"] != "Ok"
+                )
+                latencies["static"].append(static["elapsed_ms"])
+                latencies["depart"].append(depart["elapsed_ms"])
+                latencies["asymmetric"].append(asymmetric["elapsed_ms"])
+                latencies["overlay"].append(overlay["elapsed_ms"])
+                if static["code"] == "Ok":
+                    ok_latencies["static"].append(static["elapsed_ms"])
+                if depart["code"] == "Ok":
+                    ok_latencies["depart"].append(depart["elapsed_ms"])
+                if asymmetric["code"] == "Ok":
+                    ok_latencies["asymmetric"].append(asymmetric["elapsed_ms"])
+                if overlay["code"] == "Ok":
+                    ok_latencies["overlay"].append(overlay["elapsed_ms"])
 
                 if writer:
                     write_csv_row(
@@ -475,8 +586,10 @@ def run(args):
                         static,
                         depart,
                         asymmetric,
+                        overlay,
                         depart_effect,
                         asym_effect,
+                        overlay_effect,
                     )
 
                 if args.progress_every and completed % args.progress_every == 0:
@@ -484,9 +597,13 @@ def run(args):
                         f"{completed}/{args.requests}: "
                         f"static_ok={counters['static_ok']} "
                         f"asym_ok={counters['asymmetric_ok']} "
+                        f"overlay_ok={counters['overlay_ok']} "
                         f"depart_effect={counters['depart_effect']} "
                         f"asym_effect={counters['asymmetric_effect']} "
+                        f"overlay_effect={counters['overlay_effect']} "
                         f"asym_regressions={counters['static_ok_asymmetric_failed']}"
+                        f" overlay_regressions={counters['static_ok_overlay_failed']}"
+                        f" overlay_vs_asym={counters['asymmetric_ok_overlay_failed']}"
                     )
     finally:
         if output_handle:
@@ -496,6 +613,34 @@ def run(args):
     for key, value in counters.items():
         print(f"  {key}: {value}")
 
+    print("\nLatency (ms, all samples)")
+    for mode in ("static", "depart", "asymmetric", "overlay"):
+        stats = compute_latency_stats(latencies[mode])
+        if stats is None:
+            print(f"  {mode}: no samples")
+            continue
+
+        print(
+            f"  {mode}: count={stats['count']} "
+            f"mean={stats['mean']:.2f} "
+            f"median={stats['median']:.2f} "
+            f"p95={stats['p95']:.2f}"
+        )
+
+    print("\nLatency (ms, Ok only)")
+    for mode in ("static", "depart", "asymmetric", "overlay"):
+        stats = compute_latency_stats(ok_latencies[mode])
+        if stats is None:
+            print(f"  {mode}: no Ok samples")
+            continue
+
+        print(
+            f"  {mode}: count={stats['count']} "
+            f"mean={stats['mean']:.2f} "
+            f"median={stats['median']:.2f} "
+            f"p95={stats['p95']:.2f}"
+        )
+
     failed = False
     if args.fail_on_asymmetric_noroute and counters["static_ok_asymmetric_failed"] > 0:
         print(
@@ -503,10 +648,32 @@ def run(args):
         )
         failed = True
 
-    if counters["depart_effect"] + counters["asymmetric_effect"] < args.min_temporal_effects:
+    if args.fail_on_overlay_noroute and counters["static_ok_overlay_failed"] > 0:
+        print(
+            "\nFAIL: at least one pair routed statically but failed in "
+            "temporal_mode=overlay_asymmetric"
+        )
+        failed = True
+
+    if (
+        args.fail_on_overlay_vs_asymmetric_noroute
+        and counters["asymmetric_ok_overlay_failed"] > 0
+    ):
+        print(
+            "\nFAIL: at least one pair routed in temporal_mode=asymmetric but failed in "
+            "temporal_mode=overlay_asymmetric"
+        )
+        failed = True
+
+    total_temporal_effects = (
+        counters["depart_effect"]
+        + counters["asymmetric_effect"]
+        + counters["overlay_effect"]
+    )
+    if total_temporal_effects < args.min_temporal_effects:
         print(
             "\nFAIL: temporal effect count "
-            f"{counters['depart_effect'] + counters['asymmetric_effect']} "
+            f"{total_temporal_effects} "
             f"is below --min-temporal-effects={args.min_temporal_effects}"
         )
         failed = True
@@ -555,13 +722,25 @@ def main():
         "--min-temporal-effects",
         type=int,
         default=0,
-        help="Fail unless at least this many depart/asymmetric requests differ from static.",
+        help="Fail unless at least this many depart/asymmetric/overlay requests differ from static.",
     )
     parser.add_argument(
         "--fail-on-asymmetric-noroute",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Fail if static route is Ok but temporal_mode=asymmetric is not Ok.",
+    )
+    parser.add_argument(
+        "--fail-on-overlay-noroute",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fail if static route is Ok but temporal_mode=overlay_asymmetric is not Ok.",
+    )
+    parser.add_argument(
+        "--fail-on-overlay-vs-asymmetric-noroute",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fail if temporal_mode=asymmetric is Ok but temporal_mode=overlay_asymmetric is not Ok.",
     )
 
     args = parser.parse_args()

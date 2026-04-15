@@ -17,6 +17,15 @@ namespace osrm::engine::temporal
 {
 
 using TemporalProfileCoefficient = std::int32_t;
+using TemporalFunctionCoefficient = TemporalProfileCoefficient;
+
+struct TemporalProfileAdaptiveCompression
+{
+    std::vector<TemporalProfileCoefficient> coefficients;
+    bool used_fallback_coeff_count = false;
+};
+
+using TemporalFunctionAdaptiveCompression = TemporalProfileAdaptiveCompression;
 
 namespace detail
 {
@@ -113,6 +122,49 @@ CompressTemporalProfile(const std::vector<EdgeDuration::value_type> &profile,
     return compressed;
 }
 
+inline std::vector<TemporalFunctionCoefficient>
+CompressTemporalFunction(const std::vector<EdgeDuration::value_type> &profile,
+                         const std::uint32_t coeff_count)
+{
+    return CompressTemporalProfile(profile, coeff_count);
+}
+
+inline bool IsTemporalProfileFIFO(const std::vector<EdgeDuration::value_type> &profile,
+                                  const std::uint32_t bucket_size_minutes)
+{
+    if (profile.size() <= 1 || bucket_size_minutes == 0)
+    {
+        return true;
+    }
+
+    const auto bucket_span =
+        static_cast<std::int64_t>(bucket_size_minutes) * 60LL * 10LL;
+    const auto week_span = bucket_span * static_cast<std::int64_t>(profile.size());
+
+    for (std::size_t bucket = 0; bucket + 1 < profile.size(); ++bucket)
+    {
+        const auto current_arrival =
+            static_cast<std::int64_t>(bucket) * bucket_span + profile[bucket];
+        const auto next_arrival =
+            static_cast<std::int64_t>(bucket + 1U) * bucket_span + profile[bucket + 1U];
+        if (current_arrival > next_arrival)
+        {
+            return false;
+        }
+    }
+
+    const auto final_arrival =
+        static_cast<std::int64_t>(profile.size() - 1U) * bucket_span + profile.back();
+    const auto wrapped_arrival = week_span + profile.front();
+    return final_arrival <= wrapped_arrival;
+}
+
+inline bool IsTemporalFunctionFIFO(const std::vector<EdgeDuration::value_type> &profile,
+                                   const std::uint32_t bucket_size_minutes)
+{
+    return IsTemporalProfileFIFO(profile, bucket_size_minutes);
+}
+
 inline std::vector<EdgeDuration::value_type>
 ExpandTemporalProfile(const std::uint32_t week_bucket_count,
                       const TemporalProfileCoefficient *coefficients,
@@ -140,11 +192,18 @@ ComputeTemporalProfileError(const std::vector<EdgeDuration::value_type> &referen
     return {mean_abs_error, max_abs_error};
 }
 
-inline std::vector<TemporalProfileCoefficient>
-CompressTemporalProfileAdaptive(const std::vector<EdgeDuration::value_type> &profile,
-                                const std::uint32_t preferred_coeff_count,
-                                const float max_mean_abs_error = 1.0F,
-                                const float max_bucket_abs_error = 2.0F)
+inline std::pair<float, float>
+ComputeTemporalFunctionError(const std::vector<EdgeDuration::value_type> &reference_profile,
+                             const std::vector<EdgeDuration::value_type> &decoded_profile)
+{
+    return ComputeTemporalProfileError(reference_profile, decoded_profile);
+}
+
+inline TemporalProfileAdaptiveCompression
+CompressTemporalProfileAdaptiveWithStatus(const std::vector<EdgeDuration::value_type> &profile,
+                                          const std::uint32_t preferred_coeff_count,
+                                          const float max_mean_abs_error = 1.0F,
+                                          const float max_bucket_abs_error = 2.0F)
 {
     if (profile.empty() || preferred_coeff_count == 0)
     {
@@ -159,7 +218,7 @@ CompressTemporalProfileAdaptive(const std::vector<EdgeDuration::value_type> &pro
     const auto compressed = CompressTemporalProfile(profile, initial_coeff_count);
     if (initial_coeff_count == profile.size())
     {
-        return compressed;
+        return {compressed, false};
     }
 
     const auto expanded = ExpandTemporalProfile(static_cast<std::uint32_t>(profile.size()),
@@ -171,10 +230,42 @@ CompressTemporalProfileAdaptive(const std::vector<EdgeDuration::value_type> &pro
 
     if (mean_abs_error <= max_mean_abs_error && max_abs_error <= max_bucket_abs_error)
     {
-        return compressed;
+        return {compressed, false};
     }
 
-    return CompressTemporalProfile(profile, static_cast<std::uint32_t>(profile.size()));
+    return {CompressTemporalProfile(profile, static_cast<std::uint32_t>(profile.size())), true};
+}
+
+inline std::vector<TemporalProfileCoefficient>
+CompressTemporalProfileAdaptive(const std::vector<EdgeDuration::value_type> &profile,
+                                const std::uint32_t preferred_coeff_count,
+                                const float max_mean_abs_error = 1.0F,
+                                const float max_bucket_abs_error = 2.0F)
+{
+    return CompressTemporalProfileAdaptiveWithStatus(
+               profile, preferred_coeff_count, max_mean_abs_error, max_bucket_abs_error)
+        .coefficients;
+}
+
+inline TemporalFunctionAdaptiveCompression
+CompressTemporalFunctionAdaptiveWithStatus(const std::vector<EdgeDuration::value_type> &profile,
+                                           const std::uint32_t preferred_coeff_count,
+                                           const float max_mean_abs_error = 1.0F,
+                                           const float max_bucket_abs_error = 2.0F)
+{
+    return CompressTemporalProfileAdaptiveWithStatus(
+        profile, preferred_coeff_count, max_mean_abs_error, max_bucket_abs_error);
+}
+
+inline std::vector<TemporalFunctionCoefficient>
+CompressTemporalFunctionAdaptive(const std::vector<EdgeDuration::value_type> &profile,
+                                 const std::uint32_t preferred_coeff_count,
+                                 const float max_mean_abs_error = 1.0F,
+                                 const float max_bucket_abs_error = 2.0F)
+{
+    return CompressTemporalFunctionAdaptiveWithStatus(
+               profile, preferred_coeff_count, max_mean_abs_error, max_bucket_abs_error)
+        .coefficients;
 }
 
 inline EdgeDuration
@@ -208,6 +299,17 @@ DecodeTemporalProfileBucket(const std::uint32_t week_bucket_count,
         detail::clampDecodedDuration(decoded_duration, minimum_duration)};
 }
 
+inline EdgeDuration
+DecodeTemporalFunctionBucket(const std::uint32_t week_bucket_count,
+                             const TemporalFunctionCoefficient *coefficients,
+                             const std::uint32_t coeff_count,
+                             const std::uint32_t week_bucket,
+                             const EdgeDuration minimum_duration = EdgeDuration{1})
+{
+    return DecodeTemporalProfileBucket(
+        week_bucket_count, coefficients, coeff_count, week_bucket, minimum_duration);
+}
+
 inline std::vector<EdgeDuration::value_type>
 ExpandTemporalProfile(const std::uint32_t week_bucket_count,
                       const TemporalProfileCoefficient *coefficients,
@@ -225,6 +327,15 @@ ExpandTemporalProfile(const std::uint32_t week_bucket_count,
     }
 
     return expanded;
+}
+
+inline std::vector<EdgeDuration::value_type>
+ExpandTemporalFunction(const std::uint32_t week_bucket_count,
+                       const TemporalFunctionCoefficient *coefficients,
+                       const std::uint32_t coeff_count,
+                       const EdgeDuration minimum_duration = EdgeDuration{1})
+{
+    return ExpandTemporalProfile(week_bucket_count, coefficients, coeff_count, minimum_duration);
 }
 
 } // namespace osrm::engine::temporal

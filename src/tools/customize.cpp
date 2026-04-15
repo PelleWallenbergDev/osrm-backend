@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <thread>
 
@@ -60,6 +61,26 @@ return_code parseArguments(int argc,
                 ->composing(),
             "Lookup files containing from_osm_id, to_osm_id, direction, week_bucket, value data "
             "to build temporal segment profiles")(
+            "write-temporal-overlay-sidecar",
+            boost::program_options::value<bool>(
+                &customization_config.updater_config.write_temporal_overlay_sidecar)
+                ->default_value(false),
+            "Write optional temporal MLD overlay shortcut sidecars")(
+            "write-temporal-overlay-dense-debug",
+            boost::program_options::value<bool>(
+                &customization_config.updater_config.write_temporal_overlay_debug_dense)
+                ->default_value(false),
+            "Store temporal overlay shortcut functions in dense form for debugging")(
+            "temporal-overlay-min-level",
+            boost::program_options::value<std::uint32_t>(
+                &customization_config.updater_config.temporal_overlay_min_level)
+                ->default_value(1),
+            "Lowest MLD level to build temporal overlay shortcuts for")(
+            "temporal-overlay-max-level",
+            boost::program_options::value<std::uint32_t>(
+                &customization_config.updater_config.temporal_overlay_max_level)
+                ->default_value(std::numeric_limits<std::uint32_t>::max()),
+            "Highest MLD level to build temporal overlay shortcuts for")(
             "turn-penalty-file",
             boost::program_options::value<std::vector<std::string>>(
                 &customization_config.updater_config.turn_penalty_lookup_paths)

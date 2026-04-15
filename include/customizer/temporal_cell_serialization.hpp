@@ -1,0 +1,6 @@
+#ifndef OSRM_CUSTOMIZER_TEMPORAL_CELL_SERIALIZATION_HPP
+#define OSRM_CUSTOMIZER_TEMPORAL_CELL_SERIALIZATION_HPP
+
+#include "customizer/serialization.hpp"
+
+#endif

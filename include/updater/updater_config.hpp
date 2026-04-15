@@ -33,6 +33,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <string>
 
 namespace osrm::updater
@@ -77,6 +78,10 @@ struct UpdaterConfig final : storage::IOConfig
     std::uint32_t temporal_bucket_size_minutes = 15;
     std::uint32_t temporal_week_bucket_count = 672;
     std::uint32_t temporal_dct_coeff_count = 200;
+    bool write_temporal_overlay_sidecar = false;
+    bool write_temporal_overlay_debug_dense = false;
+    std::uint32_t temporal_overlay_min_level = 1;
+    std::uint32_t temporal_overlay_max_level = std::numeric_limits<std::uint32_t>::max();
     std::uint32_t hit_fcd_forward_direction = 1;
     std::uint32_t hit_fcd_reverse_direction = 2;
     std::string tz_file_path;

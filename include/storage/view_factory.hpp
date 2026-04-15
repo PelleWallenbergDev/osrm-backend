@@ -7,6 +7,7 @@
 #include "contractor/query_graph.hpp"
 
 #include "customizer/edge_based_graph.hpp"
+#include "customizer/temporal_cell_metric.hpp"
 #include "customizer/temporal_profiles.hpp"
 
 #include "extractor/class_data.hpp"
@@ -206,6 +207,8 @@ inline auto make_temporal_profile_storage_view(const SharedDataIndex &index,
         index, name + "/min_durations");
     auto freeflow_durations = make_optional_vector_view<customizer::TemporalProfileDurationValue>(
         index, name + "/freeflow_durations");
+    auto profile_flags =
+        make_optional_vector_view<customizer::TemporalFunctionFlags>(index, name + "/profile_flags");
     auto values =
         make_optional_vector_view<customizer::TemporalProfileBucketValue>(index, name + "/values");
     auto coeffs =
@@ -218,8 +221,40 @@ inline auto make_temporal_profile_storage_view(const SharedDataIndex &index,
                                                   encoding_version,
                                                   min_durations,
                                                   freeflow_durations,
+                                                  profile_flags,
                                                   values,
                                                   coeffs};
+}
+
+inline auto make_temporal_function_storage_view(const SharedDataIndex &index,
+                                                const std::string &name)
+{
+    auto profile_offsets = make_vector_view<std::uint64_t>(index, name + "/profile_offsets");
+    auto profile_sizes = make_vector_view<std::uint32_t>(index, name + "/profile_sizes");
+    auto bucket_size_minutes = index.GetBlockPtr<std::uint32_t>(name + "/bucket_size_minutes");
+    auto week_bucket_count = index.GetBlockPtr<std::uint32_t>(name + "/week_bucket_count");
+    auto encoding_version = index.GetBlockPtr<std::uint32_t>(name + "/encoding_version");
+    auto min_durations = make_optional_vector_view<customizer::TemporalFunctionDurationValue>(
+        index, name + "/min_durations");
+    auto freeflow_durations = make_optional_vector_view<customizer::TemporalFunctionDurationValue>(
+        index, name + "/freeflow_durations");
+    auto profile_flags =
+        make_optional_vector_view<customizer::TemporalFunctionFlags>(index, name + "/profile_flags");
+    auto values =
+        make_optional_vector_view<customizer::TemporalFunctionBucketValue>(index, name + "/values");
+    auto coeffs =
+        make_optional_vector_view<customizer::TemporalFunctionCoeffValue>(index, name + "/coeffs");
+
+    return customizer::TemporalFunctionStorageView{profile_offsets,
+                                                   profile_sizes,
+                                                   bucket_size_minutes,
+                                                   week_bucket_count,
+                                                   encoding_version,
+                                                   min_durations,
+                                                   freeflow_durations,
+                                                   profile_flags,
+                                                   values,
+                                                   coeffs};
 }
 
 inline auto make_coordinates_view(const SharedDataIndex &index, const std::string &name)
@@ -371,6 +406,36 @@ inline auto make_cell_metric_view(const SharedDataIndex &index, const std::strin
         auto distances = make_vector_view<EdgeDistance>(index, distances_block_id);
 
         cell_metric_excludes.push_back(customizer::CellMetricView{weights, durations, distances});
+    }
+
+    return cell_metric_excludes;
+}
+
+inline auto make_filtered_temporal_cell_metric_view(const SharedDataIndex &index,
+                                                    const std::string &name,
+                                                    const std::size_t exclude_index)
+{
+    auto prefix = name + "/exclude/" + std::to_string(exclude_index);
+    auto function_ids =
+        make_vector_view<customizer::TemporalFunctionID>(index, prefix + "/function_ids");
+    auto min_durations = make_vector_view<EdgeDuration>(index, prefix + "/min_durations");
+
+    return customizer::TemporalCellMetricView{function_ids, min_durations};
+}
+
+inline auto make_temporal_cell_metric_view(const SharedDataIndex &index, const std::string &name)
+{
+    std::vector<customizer::TemporalCellMetricView> cell_metric_excludes;
+
+    std::vector<std::string> metric_prefix_names;
+    index.List(name + "/exclude/", std::back_inserter(metric_prefix_names));
+    for (const auto &prefix : metric_prefix_names)
+    {
+        auto function_ids =
+            make_vector_view<customizer::TemporalFunctionID>(index, prefix + "/function_ids");
+        auto min_durations = make_vector_view<EdgeDuration>(index, prefix + "/min_durations");
+        cell_metric_excludes.push_back(
+            customizer::TemporalCellMetricView{function_ids, min_durations});
     }
 
     return cell_metric_excludes;

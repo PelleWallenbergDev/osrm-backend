@@ -377,6 +377,38 @@ template <storage::Ownership Ownership> class CellStorageImpl
         return metric;
     }
 
+    ValueOffset GetTotalValueCount() const
+    {
+        if (cells.empty())
+        {
+            return 0;
+        }
+
+        const auto &last_cell = cells.back();
+        return last_cell.value_offset +
+               static_cast<ValueOffset>(last_cell.num_source_nodes) * last_cell.num_destination_nodes;
+    }
+
+    const CellData &GetCellData(LevelID level, CellID id) const
+    {
+        const auto level_index = LevelIDToIndex(level);
+        BOOST_ASSERT(level_index < level_to_cell_offset.size());
+        const auto offset = level_to_cell_offset[level_index];
+        const auto cell_index = offset + id;
+        BOOST_ASSERT(cell_index < cells.size());
+        return cells[cell_index];
+    }
+
+    const NodeID *GetSourceBoundaryData() const
+    {
+        return source_boundary.empty() ? nullptr : source_boundary.data();
+    }
+
+    const NodeID *GetDestinationBoundaryData() const
+    {
+        return destination_boundary.empty() ? nullptr : destination_boundary.data();
+    }
+
     template <typename = std::enable_if<Ownership == storage::Ownership::View>>
     CellStorageImpl(Vector<NodeID> source_boundary_,
                     Vector<NodeID> destination_boundary_,

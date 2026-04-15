@@ -112,7 +112,10 @@ struct StorageConfig final : IOConfig
                ".osrm.partition",
                ".osrm.temporal_index",
                ".osrm.temporal_profiles",
-               ".osrm.temporal_meta"},
+               ".osrm.temporal_meta",
+               ".osrm.temporal_cell_metrics",
+               ".osrm.temporal_cell_profiles",
+               ".osrm.temporal_cell_meta"},
               {})
     {
     }

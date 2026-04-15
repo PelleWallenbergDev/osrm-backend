@@ -729,15 +729,48 @@ class ContiguousInternalMemoryDataFacade<CH>
 
 template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public AlgorithmDataFacade<MLD>
 {
+    using TemporalFunctionStorageView = customizer::TemporalFunctionStorageView;
+    using TemporalCellMetricView = customizer::TemporalCellMetricView;
+
     // MLD data
     partitioner::MultiLevelPartitionView mld_partition;
     partitioner::CellStorageView mld_cell_storage;
     customizer::CellMetricView mld_cell_metric;
+    std::optional<TemporalCellMetricView> mld_temporal_cell_metric;
+    std::optional<TemporalFunctionStorageView> mld_temporal_cell_storage;
     using QueryGraph = customizer::MultiLevelEdgeBasedGraphView;
     using GraphNode = QueryGraph::NodeArrayEntry;
     using GraphEdge = QueryGraph::EdgeArrayEntry;
 
     QueryGraph query_graph;
+
+    customizer::TemporalFunctionID FindTemporalShortcutFunctionID(const LevelID level,
+                                                                 const CellID cell_id,
+                                                                 const NodeID from,
+                                                                 const NodeID to) const
+    {
+        if (!mld_temporal_cell_metric || !mld_temporal_cell_storage)
+        {
+            return customizer::INVALID_TEMPORAL_FUNCTION_ID;
+        }
+
+        const auto cell = mld_temporal_cell_metric->GetCell(mld_cell_storage, level, cell_id);
+        auto destination_iterator = cell.GetDestinationNodes().begin();
+        auto function_iterator = cell.GetOutFunctionID(from).begin();
+        const auto destination_end = cell.GetDestinationNodes().end();
+        const auto function_end = cell.GetOutFunctionID(from).end();
+
+        for (; destination_iterator != destination_end && function_iterator != function_end;
+             ++destination_iterator, ++function_iterator)
+        {
+            if (*destination_iterator == to)
+            {
+                return *function_iterator;
+            }
+        }
+
+        return customizer::INVALID_TEMPORAL_FUNCTION_ID;
+    }
 
     void InitializeInternalPointers(const storage::SharedDataIndex &index,
                                     const std::string &metric_name,
@@ -748,6 +781,17 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
             make_filtered_cell_metric_view(index, "/mld/metrics/" + metric_name, exclude_index);
         mld_cell_storage = make_cell_storage_view(index, "/mld/cellstorage");
         query_graph = make_multi_level_graph_view(index, "/mld/multilevelgraph");
+
+        const auto temporal_metric_prefix =
+            "/mld/temporal_metrics/" + metric_name + "/exclude/" + std::to_string(exclude_index);
+        if (storage::has_block(index, temporal_metric_prefix + "/function_ids") &&
+            storage::has_block(index, "/mld/temporal_metric_storage/profile_offsets"))
+        {
+            mld_temporal_cell_metric = make_filtered_temporal_cell_metric_view(
+                index, "/mld/temporal_metrics/" + metric_name, exclude_index);
+            mld_temporal_cell_storage =
+                make_temporal_function_storage_view(index, "/mld/temporal_metric_storage");
+        }
     }
 
     // allocator that keeps the allocation data
@@ -771,6 +815,47 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
     const partitioner::CellStorageView &GetCellStorage() const override { return mld_cell_storage; }
 
     const customizer::CellMetricView &GetCellMetric() const override { return mld_cell_metric; }
+
+    bool HasTemporalShortcut(const LevelID level,
+                             const CellID cell_id,
+                             const NodeID from,
+                             const NodeID to) const override final
+    {
+        const auto function_id = FindTemporalShortcutFunctionID(level, cell_id, from, to);
+        return function_id != customizer::INVALID_TEMPORAL_FUNCTION_ID && mld_temporal_cell_storage &&
+               mld_temporal_cell_storage->HasProfile(function_id);
+    }
+
+    EdgeDuration GetTemporalShortcutDuration(const LevelID level,
+                                             const CellID cell_id,
+                                             const NodeID from,
+                                             const NodeID to,
+                                             const std::uint32_t week_bucket) const override final
+    {
+        const auto function_id = FindTemporalShortcutFunctionID(level, cell_id, from, to);
+        if (function_id == customizer::INVALID_TEMPORAL_FUNCTION_ID || !mld_temporal_cell_storage ||
+            !mld_temporal_cell_storage->HasProfile(function_id))
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        return mld_temporal_cell_storage->GetDuration(function_id, week_bucket);
+    }
+
+    EdgeDuration GetTemporalShortcutMinDuration(const LevelID level,
+                                                const CellID cell_id,
+                                                const NodeID from,
+                                                const NodeID to) const override final
+    {
+        const auto function_id = FindTemporalShortcutFunctionID(level, cell_id, from, to);
+        if (function_id == customizer::INVALID_TEMPORAL_FUNCTION_ID || !mld_temporal_cell_storage ||
+            !mld_temporal_cell_storage->HasProfile(function_id))
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        return mld_temporal_cell_storage->GetMinDuration(function_id);
+    }
 
     // search graph access
     unsigned GetNumberOfNodes() const override final { return query_graph.GetNumberOfNodes(); }

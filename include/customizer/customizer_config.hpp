@@ -15,11 +15,15 @@ struct CustomizationConfig final : storage::IOConfig
         : IOConfig({".osrm.ebg",
                     ".osrm.partition",
                     ".osrm.cells",
-                    ".osrm.ebg_nodes",
-                    ".osrm.properties",
-                    ".osrm.enw"},
+                   ".osrm.ebg_nodes",
+                   ".osrm.properties",
+                   ".osrm.enw"},
                    {},
-                   {".osrm.cell_metrics", ".osrm.mldgr"}),
+                   {".osrm.cell_metrics",
+                    ".osrm.mldgr",
+                    ".osrm.temporal_cell_metrics",
+                    ".osrm.temporal_cell_profiles",
+                    ".osrm.temporal_cell_meta"}),
           requested_num_threads(0)
     {
     }

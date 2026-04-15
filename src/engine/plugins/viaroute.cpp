@@ -32,8 +32,13 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
     const auto use_temporal_asymmetric_routing =
         route_parameters.temporal_routing_mode ==
         api::RouteParameters::TemporalRoutingMode::Asymmetric;
+    const auto use_temporal_overlay_routing =
+        route_parameters.temporal_routing_mode ==
+        api::RouteParameters::TemporalRoutingMode::OverlayAsymmetric;
+    const auto use_temporal_direct_routing =
+        use_temporal_asymmetric_routing || use_temporal_overlay_routing;
 
-    if (!use_temporal_asymmetric_routing && !algorithms.HasShortestPathSearch() &&
+    if (!use_temporal_direct_routing && !algorithms.HasShortestPathSearch() &&
         route_parameters.coordinates.size() > 2)
     {
         return Error("NotImplemented",
@@ -42,7 +47,7 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
                      result);
     }
 
-    if (!use_temporal_asymmetric_routing && !algorithms.HasDirectShortestPathSearch() &&
+    if (!use_temporal_direct_routing && !algorithms.HasDirectShortestPathSearch() &&
         !algorithms.HasShortestPathSearch())
     {
         return Error(
@@ -111,7 +116,7 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
 
     InternalManyRoutesResult routes;
     const auto use_temporal_candidate_reranking =
-        !use_temporal_asymmetric_routing && route_parameters.departure_timestamp &&
+        !use_temporal_direct_routing && route_parameters.departure_timestamp &&
         2 == snapped_phantoms.size() &&
         algorithms.HasAlternativePathSearch() && max_alternatives > 0;
 
@@ -150,6 +155,41 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
         }
 
         routes = algorithms.TemporalAsymmetricDirectShortestPathSearch(
+            {snapped_phantoms[0], snapped_phantoms[1]}, *route_parameters.departure_timestamp);
+    }
+    else if (use_temporal_overlay_routing)
+    {
+        if (!route_parameters.departure_timestamp)
+        {
+            return Error("InvalidValue",
+                         "temporal_mode=overlay_asymmetric requires depart_at.",
+                         result);
+        }
+
+        if (2 != snapped_phantoms.size())
+        {
+            return Error("NotImplemented",
+                         "temporal_mode=overlay_asymmetric currently supports only two "
+                         "coordinates.",
+                         result);
+        }
+
+        if (wants_alternatives)
+        {
+            return Error("NotImplemented",
+                         "temporal_mode=overlay_asymmetric does not support alternatives.",
+                         result);
+        }
+
+        if (!algorithms.HasTemporalOverlayDirectShortestPathSearch())
+        {
+            return Error("NotImplemented",
+                         "Temporal overlay routing is not implemented for the chosen search "
+                         "algorithm.",
+                         result);
+        }
+
+        routes = algorithms.TemporalOverlayDirectShortestPathSearch(
             {snapped_phantoms[0], snapped_phantoms[1]}, *route_parameters.departure_timestamp);
     }
     else if (use_temporal_candidate_reranking)

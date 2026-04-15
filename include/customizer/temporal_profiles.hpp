@@ -17,11 +17,24 @@ using TemporalProfileID = std::uint32_t;
 using TemporalProfileBucketValue = EdgeDuration::value_type;
 using TemporalProfileDurationValue = EdgeDuration::value_type;
 using TemporalProfileCoeffValue = engine::temporal::TemporalProfileCoefficient;
+using TemporalFunctionID = TemporalProfileID;
+using TemporalFunctionBucketValue = TemporalProfileBucketValue;
+using TemporalFunctionDurationValue = TemporalProfileDurationValue;
+using TemporalFunctionCoeffValue = engine::temporal::TemporalFunctionCoefficient;
+using TemporalFunctionFlags = std::uint8_t;
 
 inline constexpr TemporalProfileID INVALID_TEMPORAL_PROFILE_ID =
     std::numeric_limits<TemporalProfileID>::max();
+inline constexpr TemporalFunctionID INVALID_TEMPORAL_FUNCTION_ID = INVALID_TEMPORAL_PROFILE_ID;
 inline constexpr std::uint32_t TEMPORAL_PROFILE_ENCODING_VERSION_DENSE = 1;
 inline constexpr std::uint32_t TEMPORAL_PROFILE_ENCODING_VERSION_DCT = 2;
+inline constexpr std::uint32_t TEMPORAL_FUNCTION_ENCODING_VERSION_DENSE =
+    TEMPORAL_PROFILE_ENCODING_VERSION_DENSE;
+inline constexpr std::uint32_t TEMPORAL_FUNCTION_ENCODING_VERSION_DCT =
+    TEMPORAL_PROFILE_ENCODING_VERSION_DCT;
+inline constexpr TemporalFunctionFlags TEMPORAL_FUNCTION_FLAG_NONE = 0;
+inline constexpr TemporalFunctionFlags TEMPORAL_FUNCTION_FLAG_FIFO_VALID = 1U << 0;
+inline constexpr TemporalFunctionFlags TEMPORAL_FUNCTION_FLAG_USED_FALLBACK_COEFF_COUNT = 1U << 1;
 
 struct TemporalProfileMeta
 {
@@ -29,6 +42,7 @@ struct TemporalProfileMeta
     std::uint32_t week_bucket_count = 0;
     std::uint32_t encoding_version = TEMPORAL_PROFILE_ENCODING_VERSION_DENSE;
 };
+using TemporalFunctionMeta = TemporalProfileMeta;
 
 struct TemporalProfileIndex
 {
@@ -57,6 +71,7 @@ struct TemporalProfileIndex
         return HasReverseProfile(id) ? reverse_profile_ids[id] : INVALID_TEMPORAL_PROFILE_ID;
     }
 };
+using TemporalFunctionIndex = TemporalProfileIndex;
 
 struct TemporalProfileIndexView
 {
@@ -85,6 +100,7 @@ struct TemporalProfileIndexView
         return HasReverseProfile(id) ? reverse_profile_ids[id] : INVALID_TEMPORAL_PROFILE_ID;
     }
 };
+using TemporalFunctionIndexView = TemporalProfileIndexView;
 
 struct TemporalProfileStorage
 {
@@ -93,6 +109,7 @@ struct TemporalProfileStorage
     std::vector<std::uint32_t> profile_sizes;
     std::vector<TemporalProfileDurationValue> min_durations;
     std::vector<TemporalProfileDurationValue> freeflow_durations;
+    std::vector<TemporalFunctionFlags> profile_flags;
     std::vector<TemporalProfileBucketValue> values;
     std::vector<TemporalProfileCoeffValue> coeffs;
 
@@ -103,8 +120,13 @@ struct TemporalProfileStorage
     bool HasProfile(const TemporalProfileID id) const { return id < profile_offsets.size(); }
 
     EdgeDuration GetMinDuration(const TemporalProfileID id) const;
+    EdgeDuration GetFreeFlowDuration(const TemporalProfileID id) const;
+    TemporalFunctionFlags GetFlags(const TemporalProfileID id) const;
+    bool IsFIFOValid(const TemporalProfileID id) const;
+    bool UsedFallbackCoeffCount(const TemporalProfileID id) const;
     EdgeDuration GetDuration(const TemporalProfileID id, const std::uint32_t week_bucket) const;
 };
+using TemporalFunctionStorage = TemporalProfileStorage;
 
 struct TemporalProfileStorageView
 {
@@ -115,6 +137,7 @@ struct TemporalProfileStorageView
     std::uint32_t *encoding_version = nullptr;
     util::vector_view<TemporalProfileDurationValue> min_durations;
     util::vector_view<TemporalProfileDurationValue> freeflow_durations;
+    util::vector_view<TemporalFunctionFlags> profile_flags;
     util::vector_view<TemporalProfileBucketValue> values;
     util::vector_view<TemporalProfileCoeffValue> coeffs;
 
@@ -136,8 +159,13 @@ struct TemporalProfileStorageView
     bool HasProfile(const TemporalProfileID id) const { return id < profile_offsets.size(); }
 
     EdgeDuration GetMinDuration(const TemporalProfileID id) const;
+    EdgeDuration GetFreeFlowDuration(const TemporalProfileID id) const;
+    TemporalFunctionFlags GetFlags(const TemporalProfileID id) const;
+    bool IsFIFOValid(const TemporalProfileID id) const;
+    bool UsedFallbackCoeffCount(const TemporalProfileID id) const;
     EdgeDuration GetDuration(const TemporalProfileID id, const std::uint32_t week_bucket) const;
 };
+using TemporalFunctionStorageView = TemporalProfileStorageView;
 
 namespace detail
 {
@@ -210,11 +238,60 @@ GetTemporalProfileDuration(const StorageT &storage,
         return INVALID_EDGE_DURATION;
     }
 }
+
+template <typename StorageT>
+inline EdgeDuration GetTemporalProfileFreeFlowDuration(const StorageT &storage,
+                                                       const TemporalProfileID id)
+{
+    if (!storage.HasProfile(id))
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+    if (id < storage.freeflow_durations.size())
+    {
+        return EdgeDuration{storage.freeflow_durations[id]};
+    }
+
+    return GetTemporalProfileMinDuration(storage, id);
+}
+
+template <typename StorageT>
+inline TemporalFunctionFlags GetTemporalProfileFlags(const StorageT &storage,
+                                                     const TemporalProfileID id)
+{
+    if (!storage.HasProfile(id) || id >= storage.profile_flags.size())
+    {
+        return TEMPORAL_FUNCTION_FLAG_NONE;
+    }
+
+    return storage.profile_flags[id];
+}
 } // namespace detail
 
 inline EdgeDuration TemporalProfileStorage::GetMinDuration(const TemporalProfileID id) const
 {
     return detail::GetTemporalProfileMinDuration(*this, id);
+}
+
+inline EdgeDuration TemporalProfileStorage::GetFreeFlowDuration(const TemporalProfileID id) const
+{
+    return detail::GetTemporalProfileFreeFlowDuration(*this, id);
+}
+
+inline TemporalFunctionFlags TemporalProfileStorage::GetFlags(const TemporalProfileID id) const
+{
+    return detail::GetTemporalProfileFlags(*this, id);
+}
+
+inline bool TemporalProfileStorage::IsFIFOValid(const TemporalProfileID id) const
+{
+    return (GetFlags(id) & TEMPORAL_FUNCTION_FLAG_FIFO_VALID) != 0;
+}
+
+inline bool TemporalProfileStorage::UsedFallbackCoeffCount(const TemporalProfileID id) const
+{
+    return (GetFlags(id) & TEMPORAL_FUNCTION_FLAG_USED_FALLBACK_COEFF_COUNT) != 0;
 }
 
 inline EdgeDuration TemporalProfileStorage::GetDuration(const TemporalProfileID id,
@@ -226,6 +303,26 @@ inline EdgeDuration TemporalProfileStorage::GetDuration(const TemporalProfileID 
 inline EdgeDuration TemporalProfileStorageView::GetMinDuration(const TemporalProfileID id) const
 {
     return detail::GetTemporalProfileMinDuration(*this, id);
+}
+
+inline EdgeDuration TemporalProfileStorageView::GetFreeFlowDuration(const TemporalProfileID id) const
+{
+    return detail::GetTemporalProfileFreeFlowDuration(*this, id);
+}
+
+inline TemporalFunctionFlags TemporalProfileStorageView::GetFlags(const TemporalProfileID id) const
+{
+    return detail::GetTemporalProfileFlags(*this, id);
+}
+
+inline bool TemporalProfileStorageView::IsFIFOValid(const TemporalProfileID id) const
+{
+    return (GetFlags(id) & TEMPORAL_FUNCTION_FLAG_FIFO_VALID) != 0;
+}
+
+inline bool TemporalProfileStorageView::UsedFallbackCoeffCount(const TemporalProfileID id) const
+{
+    return (GetFlags(id) & TEMPORAL_FUNCTION_FLAG_USED_FALLBACK_COEFF_COUNT) != 0;
 }
 
 inline EdgeDuration TemporalProfileStorageView::GetDuration(const TemporalProfileID id,

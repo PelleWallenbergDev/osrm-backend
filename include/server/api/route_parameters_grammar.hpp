@@ -83,7 +83,9 @@ struct RouteParametersGrammar : public BaseParametersGrammar<Iterator, Signature
             "distance", AnnotationsType::Distance)("weight", AnnotationsType::Weight)(
             "datasources", AnnotationsType::Datasources)("speed", AnnotationsType::Speed);
         temporal_routing_mode.add(
-            "asymmetric", engine::api::RouteParameters::TemporalRoutingMode::Asymmetric);
+            "asymmetric", engine::api::RouteParameters::TemporalRoutingMode::Asymmetric)(
+            "overlay_asymmetric",
+            engine::api::RouteParameters::TemporalRoutingMode::OverlayAsymmetric);
 
         waypoints_rule =
             qi::lit("waypoints=") >

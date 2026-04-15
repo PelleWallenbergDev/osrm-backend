@@ -31,6 +31,13 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
     const PhantomEndpointCandidates &endpoint_candidates,
     std::time_t departure_timestamp);
 
+template <typename Algorithm>
+InternalRouteResult temporalOverlayDirectShortestPathSearch(
+    SearchEngineData<Algorithm> &engine_working_data,
+    const DataFacade<Algorithm> &facade,
+    const PhantomEndpointCandidates &endpoint_candidates,
+    std::time_t departure_timestamp);
+
 } // namespace osrm::engine::routing_algorithms
 
 #endif /* DIRECT_SHORTEST_PATH_HPP */

@@ -2,6 +2,7 @@
 #define OSRM_CUSTOMIZER_SERIALIZATION_HPP
 
 #include "customizer/edge_based_graph.hpp"
+#include "customizer/temporal_cell_metric.hpp"
 
 #include "partitioner/cell_storage.hpp"
 
@@ -30,6 +31,24 @@ inline void write(storage::tar::FileWriter &writer,
     storage::serialization::write(writer, name + "/weights", metric.weights);
     storage::serialization::write(writer, name + "/durations", metric.durations);
     storage::serialization::write(writer, name + "/distances", metric.distances);
+}
+
+template <storage::Ownership Ownership>
+inline void read(storage::tar::FileReader &reader,
+                 const std::string &name,
+                 detail::TemporalCellMetricImpl<Ownership> &metric)
+{
+    storage::serialization::read(reader, name + "/function_ids", metric.function_ids);
+    storage::serialization::read(reader, name + "/min_durations", metric.min_durations);
+}
+
+template <storage::Ownership Ownership>
+inline void write(storage::tar::FileWriter &writer,
+                  const std::string &name,
+                  const detail::TemporalCellMetricImpl<Ownership> &metric)
+{
+    storage::serialization::write(writer, name + "/function_ids", metric.function_ids);
+    storage::serialization::write(writer, name + "/min_durations", metric.min_durations);
 }
 
 template <typename EdgeDataT, storage::Ownership Ownership>

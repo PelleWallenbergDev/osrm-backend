@@ -79,7 +79,8 @@ struct RouteParameters : public BaseParameters
     enum class TemporalRoutingMode
     {
         None,
-        Asymmetric
+        Asymmetric,
+        OverlayAsymmetric
     };
 
     RouteParameters() = default;

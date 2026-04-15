@@ -3,6 +3,7 @@
 
 #include "contractor/query_edge.hpp"
 #include "customizer/edge_based_graph.hpp"
+#include "customizer/temporal_profiles.hpp"
 #include "extractor/edge_based_edge.hpp"
 #include "engine/algorithm.hpp"
 
@@ -97,6 +98,22 @@ template <> class AlgorithmDataFacade<MLD>
     virtual const partitioner::CellStorageView &GetCellStorage() const = 0;
 
     virtual const customizer::CellMetricView &GetCellMetric() const = 0;
+
+    virtual bool HasTemporalShortcut(const LevelID level,
+                                     const CellID cell_id,
+                                     const NodeID from,
+                                     const NodeID to) const = 0;
+
+    virtual EdgeDuration GetTemporalShortcutDuration(const LevelID level,
+                                                     const CellID cell_id,
+                                                     const NodeID from,
+                                                     const NodeID to,
+                                                     const std::uint32_t week_bucket) const = 0;
+
+    virtual EdgeDuration GetTemporalShortcutMinDuration(const LevelID level,
+                                                        const CellID cell_id,
+                                                        const NodeID from,
+                                                        const NodeID to) const = 0;
 
     virtual EdgeRange GetBorderEdgeRange(const LevelID level,
                                          const NodeID edge_based_node_id) const = 0;

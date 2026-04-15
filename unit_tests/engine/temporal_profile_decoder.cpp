@@ -157,4 +157,34 @@ BOOST_AUTO_TEST_CASE(adaptive_compression_promotes_sharp_profiles_when_needed)
     BOOST_CHECK_LE(adaptive_max_error, 2.0F);
 }
 
+BOOST_AUTO_TEST_CASE(adaptive_compression_reports_when_fallback_coeff_count_is_used)
+{
+    constexpr std::uint32_t bucket_count = 672;
+    constexpr std::uint32_t preferred_coeff_count = 200;
+
+    std::vector<EdgeDuration::value_type> profile(bucket_count, 0);
+    for (std::uint32_t bucket = 0; bucket < bucket_count; ++bucket)
+    {
+        profile[bucket] = ((bucket / 8) % 2 == 0) ? 45 : 240;
+    }
+
+    const auto adaptive = osrm::engine::temporal::CompressTemporalProfileAdaptiveWithStatus(
+        profile, preferred_coeff_count);
+
+    BOOST_CHECK(adaptive.used_fallback_coeff_count);
+    BOOST_CHECK_EQUAL(adaptive.coefficients.size(), bucket_count);
+}
+
+BOOST_AUTO_TEST_CASE(fifo_detection_accepts_monotone_arrival_profiles)
+{
+    const std::vector<EdgeDuration::value_type> fifo_profile = {1500, 1400, 1600, 1500};
+    BOOST_CHECK(osrm::engine::temporal::IsTemporalFunctionFIFO(fifo_profile, 5));
+}
+
+BOOST_AUTO_TEST_CASE(fifo_detection_rejects_profiles_with_backward_arrival_jumps)
+{
+    const std::vector<EdgeDuration::value_type> non_fifo_profile = {5000, 1, 5000, 1};
+    BOOST_CHECK(!osrm::engine::temporal::IsTemporalFunctionFIFO(non_fifo_profile, 5));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

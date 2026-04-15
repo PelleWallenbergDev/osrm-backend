@@ -2,6 +2,7 @@
 #include "engine/routing_algorithms/routing_base.hpp"
 #include "engine/routing_algorithms/routing_base_ch.hpp"
 #include "engine/routing_algorithms/routing_base_mld.hpp"
+#include "engine/routing_algorithms/routing_base_td_mld.hpp"
 #include "engine/routing_algorithms/temporal_asymmetric_mld.hpp"
 
 #include "util/for_each_pair.hpp"
@@ -163,6 +164,70 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
                         best_candidates,
                         best_path.nodes,
                         unpacked_edges);
+}
+
+template <>
+InternalRouteResult temporalOverlayDirectShortestPathSearch(
+    SearchEngineData<mld::Algorithm> &engine_working_data,
+    const DataFacade<mld::Algorithm> &facade,
+    const PhantomEndpointCandidates &endpoint_candidates,
+    std::time_t departure_timestamp)
+{
+    (void)engine_working_data;
+
+    const auto source_endpoints =
+        mld::temporal::EnumerateSourceEndpoints(endpoint_candidates.source_phantoms);
+    const auto target_endpoints =
+        mld::temporal::EnumerateTargetEndpoints(endpoint_candidates.target_phantoms);
+
+    if (source_endpoints.empty() || target_endpoints.empty())
+    {
+        return {};
+    }
+
+    mld::temporal::overlay::TemporalOverlayPath best_path;
+    const mld::temporal::DirectedPhantomEndpoint *best_source = nullptr;
+    const mld::temporal::DirectedPhantomEndpoint *best_target = nullptr;
+
+    for (const auto &source : source_endpoints)
+    {
+        for (const auto &target : target_endpoints)
+        {
+            const auto candidate =
+                mld::temporal::overlay::Search(facade, source, target, departure_timestamp);
+            if (!candidate.is_valid() ||
+                (best_path.is_valid() && candidate.total_duration >= best_path.total_duration))
+            {
+                continue;
+            }
+
+            best_path = candidate;
+            best_source = &source;
+            best_target = &target;
+        }
+    }
+
+    if (!best_path.is_valid() || best_source == nullptr || best_target == nullptr)
+    {
+        return {};
+    }
+
+    const auto unpacked = mld::temporal::overlay::UnpackPath(
+        facade, *best_source, *best_target, departure_timestamp, best_path);
+    if (!unpacked.is_valid())
+    {
+        return {};
+    }
+
+    PhantomNodeCandidates source_candidates{*best_source->phantom};
+    PhantomNodeCandidates target_candidates{*best_target->phantom};
+    const PhantomEndpointCandidates best_candidates{source_candidates, target_candidates};
+
+    return extractRoute(facade,
+                        alias_cast<EdgeWeight>(unpacked.total_duration),
+                        best_candidates,
+                        unpacked.nodes,
+                        unpacked.edges);
 }
 
 } // namespace osrm::engine::routing_algorithms

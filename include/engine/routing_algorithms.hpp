@@ -36,6 +36,10 @@ class RoutingAlgorithmsInterface
         const PhantomEndpointCandidates &endpoint_candidates,
         std::time_t departure_timestamp) const = 0;
 
+    virtual InternalRouteResult TemporalOverlayDirectShortestPathSearch(
+        const PhantomEndpointCandidates &endpoint_candidates,
+        std::time_t departure_timestamp) const = 0;
+
     virtual std::pair<std::vector<EdgeDuration>, std::vector<EdgeDistance>>
     ManyToManySearch(const std::vector<PhantomNodeCandidates> &candidates_list,
                      const std::vector<std::size_t> &source_indices,
@@ -59,6 +63,7 @@ class RoutingAlgorithmsInterface
     virtual bool HasShortestPathSearch() const = 0;
     virtual bool HasDirectShortestPathSearch() const = 0;
     virtual bool HasTemporalAsymmetricDirectShortestPathSearch() const = 0;
+    virtual bool HasTemporalOverlayDirectShortestPathSearch() const = 0;
     virtual bool HasMapMatching() const = 0;
     virtual bool HasManyToManySearch() const = 0;
     virtual bool SupportsDistanceAnnotationType() const = 0;
@@ -91,6 +96,10 @@ template <typename Algorithm> class RoutingAlgorithms final : public RoutingAlgo
         const PhantomEndpointCandidates &endpoint_candidates) const final override;
 
     InternalRouteResult TemporalAsymmetricDirectShortestPathSearch(
+        const PhantomEndpointCandidates &endpoint_candidates,
+        std::time_t departure_timestamp) const final override;
+
+    InternalRouteResult TemporalOverlayDirectShortestPathSearch(
         const PhantomEndpointCandidates &endpoint_candidates,
         std::time_t departure_timestamp) const final override;
 
@@ -131,6 +140,11 @@ template <typename Algorithm> class RoutingAlgorithms final : public RoutingAlgo
     bool HasTemporalAsymmetricDirectShortestPathSearch() const final override
     {
         return routing_algorithms::HasTemporalAsymmetricDirectShortestPathSearch<Algorithm>::value;
+    }
+
+    bool HasTemporalOverlayDirectShortestPathSearch() const final override
+    {
+        return routing_algorithms::HasTemporalOverlayDirectShortestPathSearch<Algorithm>::value;
     }
 
     bool HasMapMatching() const final override
@@ -198,6 +212,24 @@ InternalRouteResult RoutingAlgorithms<Algorithm>::TemporalAsymmetricDirectShorte
                       Algorithm>::value)
     {
         return routing_algorithms::temporalAsymmetricDirectShortestPathSearch(
+            heaps, *facade, endpoint_candidates, departure_timestamp);
+    }
+    else
+    {
+        (void)endpoint_candidates;
+        (void)departure_timestamp;
+        return {};
+    }
+}
+
+template <typename Algorithm>
+InternalRouteResult RoutingAlgorithms<Algorithm>::TemporalOverlayDirectShortestPathSearch(
+    const PhantomEndpointCandidates &endpoint_candidates,
+    std::time_t departure_timestamp) const
+{
+    if constexpr (routing_algorithms::HasTemporalOverlayDirectShortestPathSearch<Algorithm>::value)
+    {
+        return routing_algorithms::temporalOverlayDirectShortestPathSearch(
             heaps, *facade, endpoint_candidates, departure_timestamp);
     }
     else

@@ -8,6 +8,7 @@
 
 #include "contractor/files.hpp"
 #include "customizer/files.hpp"
+#include "customizer/temporal_cell_files.hpp"
 #include "customizer/temporal_files.hpp"
 #include "extractor/files.hpp"
 #include "guidance/files.hpp"
@@ -325,6 +326,9 @@ std::vector<std::pair<bool, std::filesystem::path>> Storage::GetUpdatableFiles()
     std::vector<std::pair<bool, std::filesystem::path>> files = {
         {IS_OPTIONAL, config.GetPath(".osrm.mldgr")},
         {IS_OPTIONAL, config.GetPath(".osrm.cell_metrics")},
+        {IS_OPTIONAL, config.GetPath(".osrm.temporal_cell_metrics")},
+        {IS_OPTIONAL, config.GetPath(".osrm.temporal_cell_profiles")},
+        {IS_OPTIONAL, config.GetPath(".osrm.temporal_cell_meta")},
         {IS_OPTIONAL, config.GetPath(".osrm.hsgr")},
         {IS_OPTIONAL, config.GetPath(".osrm.temporal_index")},
         {IS_OPTIONAL, config.GetPath(".osrm.temporal_profiles")},
@@ -509,6 +513,12 @@ void Storage::PopulateUpdatableData(const SharedDataIndex &index)
     const auto has_temporal_profiles =
         std::filesystem::exists(config.GetPath(".osrm.temporal_profiles"));
     const auto has_temporal_meta = std::filesystem::exists(config.GetPath(".osrm.temporal_meta"));
+    const auto has_temporal_cell_metrics =
+        std::filesystem::exists(config.GetPath(".osrm.temporal_cell_metrics"));
+    const auto has_temporal_cell_profiles =
+        std::filesystem::exists(config.GetPath(".osrm.temporal_cell_profiles"));
+    const auto has_temporal_cell_meta =
+        std::filesystem::exists(config.GetPath(".osrm.temporal_cell_meta"));
 
     if (has_temporal_index || has_temporal_profiles || has_temporal_meta)
     {
@@ -518,6 +528,18 @@ void Storage::PopulateUpdatableData(const SharedDataIndex &index)
                                               ".osrm.temporal_index, .osrm.temporal_profiles "
                                               "and .osrm.temporal_meta") +
                                   SOURCE_REF);
+        }
+    }
+
+    if (has_temporal_cell_metrics || has_temporal_cell_profiles || has_temporal_cell_meta)
+    {
+        if (!(has_temporal_cell_metrics && has_temporal_cell_profiles && has_temporal_cell_meta))
+        {
+            throw util::exception(
+                std::string("Temporal cell sidecar is incomplete. Expected "
+                            ".osrm.temporal_cell_metrics, .osrm.temporal_cell_profiles "
+                            "and .osrm.temporal_cell_meta") +
+                SOURCE_REF);
         }
     }
 
@@ -606,6 +628,27 @@ void Storage::PopulateUpdatableData(const SharedDataIndex &index)
             {metric_name, std::move(exclude_metrics)},
         };
         customizer::files::readCellMetrics(config.GetPath(".osrm.cell_metrics"), metrics);
+    }
+
+    if (has_temporal_cell_profiles && has_temporal_cell_meta)
+    {
+        auto temporal_cell_storage =
+            make_temporal_function_storage_view(index, "/mld/temporal_metric_storage");
+        customizer::files::readTemporalCellStorage(config.GetPath(".osrm.temporal_cell_profiles"),
+                                                   temporal_cell_storage);
+        customizer::files::readTemporalCellMeta(config.GetPath(".osrm.temporal_cell_meta"),
+                                                temporal_cell_storage);
+    }
+
+    if (has_temporal_cell_metrics)
+    {
+        auto exclude_metrics =
+            make_temporal_cell_metric_view(index, "/mld/temporal_metrics/" + metric_name);
+        std::unordered_map<std::string, std::vector<customizer::TemporalCellMetricView>> metrics = {
+            {metric_name, std::move(exclude_metrics)},
+        };
+        customizer::files::readTemporalCellMetrics(config.GetPath(".osrm.temporal_cell_metrics"),
+                                                   metrics);
     }
 
     if (std::filesystem::exists(config.GetPath(".osrm.mldgr")))
