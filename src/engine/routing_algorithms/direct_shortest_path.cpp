@@ -121,32 +121,11 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
             PhantomNodeCandidates target_candidates{*target.phantom};
             const PhantomEndpointCandidates specific_candidates{source_candidates, target_candidates};
 
-            std::optional<EdgeDuration> initial_upper_bound;
-            auto static_route =
-                routing_algorithms::directShortestPathSearch(engine_working_data,
-                                                             facade,
-                                                             specific_candidates);
-            if (static_route.is_valid())
-            {
-                const auto evaluation =
-                    engine::temporal::EvaluateRoute(facade, static_route, departure_timestamp);
-                const auto static_duration = static_route.duration();
-                if (engine::temporal::detail::IsFiniteNonNegativeDuration(
-                        evaluation.total_duration) &&
-                    (!evaluation.used_temporal ||
-                     engine::temporal::detail::IsPlausibleTemporalDuration(
-                         evaluation.total_duration, static_duration)))
-                {
-                    initial_upper_bound = evaluation.total_duration;
-                }
-            }
-
             const auto candidate = mld::temporal::Search(facade,
                                                          source,
                                                          target,
                                                          departure_timestamp,
-                                                         incoming_edges,
-                                                         initial_upper_bound);
+                                                         incoming_edges);
 
             if (!candidate.is_valid() ||
                 (best_path.is_valid() && candidate.total_duration >= best_path.total_duration))

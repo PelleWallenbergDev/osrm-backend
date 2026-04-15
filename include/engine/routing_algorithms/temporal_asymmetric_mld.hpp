@@ -253,11 +253,9 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
     const DirectedPhantomEndpoint &source,
     const DirectedPhantomEndpoint &target,
     const std::time_t departure_timestamp,
-    const std::vector<std::vector<IncomingEdge>> &incoming_edges,
-    const std::optional<EdgeDuration> initial_upper_bound = std::nullopt)
+    const std::vector<std::vector<IncomingEdge>> &incoming_edges)
 {
     TemporalAsymmetricPath best_path;
-    (void)initial_upper_bound;
     auto best_upper_bound = INVALID_EDGE_DURATION;
     const auto departure_clock = engine::temporal::ToTemporalClock(departure_timestamp);
 
@@ -449,13 +447,11 @@ template <typename FacadeT>
 TemporalAsymmetricPath Search(const FacadeT &facade,
                               const DirectedPhantomEndpoint &source,
                               const DirectedPhantomEndpoint &target,
-                              const std::time_t departure_timestamp,
-                              const std::optional<EdgeDuration> initial_upper_bound =
-                                  std::nullopt)
+                              const std::time_t departure_timestamp)
 {
     const auto incoming_edges = detail::BuildIncomingEdgeIndex(facade);
     return detail::SearchWithIncomingEdges(
-        facade, source, target, departure_timestamp, incoming_edges, initial_upper_bound);
+        facade, source, target, departure_timestamp, incoming_edges);
 }
 
 template <typename FacadeT>
@@ -463,12 +459,10 @@ TemporalAsymmetricPath Search(const FacadeT &facade,
                               const DirectedPhantomEndpoint &source,
                               const DirectedPhantomEndpoint &target,
                               const std::time_t departure_timestamp,
-                              const std::vector<std::vector<detail::IncomingEdge>> &incoming_edges,
-                              const std::optional<EdgeDuration> initial_upper_bound =
-                                  std::nullopt)
+                              const std::vector<std::vector<detail::IncomingEdge>> &incoming_edges)
 {
     return detail::SearchWithIncomingEdges(
-        facade, source, target, departure_timestamp, incoming_edges, initial_upper_bound);
+        facade, source, target, departure_timestamp, incoming_edges);
 }
 
 } // namespace osrm::engine::routing_algorithms::mld::temporal
