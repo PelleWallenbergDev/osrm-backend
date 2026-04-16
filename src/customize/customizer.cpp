@@ -213,6 +213,51 @@ customizeFilteredTemporalMetrics(const partitioner::MultiLevelEdgeBasedGraph &gr
 
     return metrics;
 }
+
+struct TemporalOverlayWorkEstimate
+{
+    std::uint64_t total_cells = 0;
+    std::uint64_t total_source_rows = 0;
+    std::uint64_t total_destination_rows = 0;
+    std::uint64_t total_boundary_pairs = 0;
+};
+
+TemporalOverlayWorkEstimate estimateTemporalOverlayWork(const partitioner::MultiLevelPartition &mlp,
+                                                        const partitioner::CellStorage &storage,
+                                                        const LevelID first_level,
+                                                        const LevelID last_level)
+{
+    TemporalOverlayWorkEstimate estimate;
+    const auto begin_level = std::max<std::size_t>(1UL, static_cast<std::size_t>(first_level));
+    const auto end_level =
+        std::min<std::size_t>(mlp.GetNumberOfLevels() > 0 ? mlp.GetNumberOfLevels() - 1 : 0,
+                              static_cast<std::size_t>(last_level));
+
+    if (mlp.GetNumberOfLevels() <= 1 || begin_level > end_level)
+    {
+        return estimate;
+    }
+
+    for (std::size_t level = begin_level; level <= end_level; ++level)
+    {
+        const auto cell_count = mlp.GetNumberOfCells(level);
+        estimate.total_cells += cell_count;
+
+        for (std::size_t id = 0; id < cell_count; ++id)
+        {
+            const auto cell = storage.GetUnfilledCell(level, id);
+            const auto source_count = static_cast<std::uint64_t>(
+                std::distance(cell.GetSourceNodes().begin(), cell.GetSourceNodes().end()));
+            const auto destination_count = static_cast<std::uint64_t>(
+                std::distance(cell.GetDestinationNodes().begin(), cell.GetDestinationNodes().end()));
+            estimate.total_source_rows += source_count;
+            estimate.total_destination_rows += destination_count;
+            estimate.total_boundary_pairs += source_count * destination_count;
+        }
+    }
+
+    return estimate;
+}
 } // namespace
 
 int Customizer::Run(const CustomizationConfig &config)
@@ -320,6 +365,35 @@ int Customizer::Run(const CustomizationConfig &config)
                     TEMPORAL_FUNCTION_ENCODING_VERSION_DCT
                 ? config.updater_config.temporal_dct_coeff_count
                 : 0U;
+        const auto work_estimate =
+            estimateTemporalOverlayWork(mlp, storage, first_level, last_level);
+
+        util::Log() << "Starting temporal overlay customization with write_temporal_overlay_sidecar="
+                    << config.updater_config.write_temporal_overlay_sidecar
+                    << ", bucket_size_minutes="
+                    << temporal_overlay_storage.meta.bucket_size_minutes
+                    << ", week_bucket_count=" << temporal_overlay_storage.meta.week_bucket_count
+                    << ", encoding_version=" << temporal_overlay_storage.meta.encoding_version
+                    << ", preferred_coeff_count=" << preferred_coeff_count
+                    << ", first_level=" << static_cast<unsigned>(first_level)
+                    << ", last_level=" << static_cast<unsigned>(last_level)
+                    << ", filter_count=" << filter.size()
+                    << ", estimated_cells=" << work_estimate.total_cells
+                    << ", estimated_source_rows=" << work_estimate.total_source_rows
+                    << ", estimated_boundary_pairs=" << work_estimate.total_boundary_pairs;
+
+        if (temporal_profile_storage)
+        {
+            util::Log() << "Loaded temporal base sidecar for overlay customization with "
+                        << temporal_profile_storage->profile_offsets.size() << " profile(s)";
+        }
+        else
+        {
+            util::Log(logWARNING)
+                << "Temporal overlay customization is running without a pre-existing temporal "
+                   "base sidecar; base graph durations will stay static";
+        }
+
         TemporalOverlayEvaluator evaluator{node_data,
                                            node_durations,
                                            temporal_profile_index ? &*temporal_profile_index
@@ -337,6 +411,11 @@ int Customizer::Run(const CustomizationConfig &config)
             temporal_overlay_storage,
             first_level,
             last_level);
+
+        util::Log() << "Temporal overlay customization finished building "
+                    << temporal_overlay_storage.profile_offsets.size()
+                    << " temporal shortcut function(s) across "
+                    << temporal_metrics.size() << " exclude-class metric set(s)";
 
         TIMER_STOP(temporal_cell_customize);
         util::Log() << "Temporal overlay customization took "

@@ -112,6 +112,50 @@ TemporalFunctionID FindFunctionID(const CellT &cell, const NodeID source, const 
 
     return INVALID_TEMPORAL_FUNCTION_ID;
 }
+
+void CheckTemporalStorageEquivalent(const TemporalFunctionStorage &lhs,
+                                    const TemporalFunctionStorage &rhs)
+{
+    BOOST_CHECK_EQUAL(lhs.meta.bucket_size_minutes, rhs.meta.bucket_size_minutes);
+    BOOST_CHECK_EQUAL(lhs.meta.week_bucket_count, rhs.meta.week_bucket_count);
+    BOOST_CHECK_EQUAL(lhs.meta.encoding_version, rhs.meta.encoding_version);
+    BOOST_REQUIRE_EQUAL(lhs.profile_offsets.size(), rhs.profile_offsets.size());
+    BOOST_REQUIRE_EQUAL(lhs.profile_sizes.size(), rhs.profile_sizes.size());
+    BOOST_REQUIRE_EQUAL(lhs.min_durations.size(), rhs.min_durations.size());
+    BOOST_REQUIRE_EQUAL(lhs.freeflow_durations.size(), rhs.freeflow_durations.size());
+    BOOST_REQUIRE_EQUAL(lhs.profile_flags.size(), rhs.profile_flags.size());
+
+    for (std::size_t function_id = 0; function_id < lhs.profile_offsets.size(); ++function_id)
+    {
+        BOOST_CHECK_EQUAL(lhs.profile_sizes[function_id], rhs.profile_sizes[function_id]);
+        BOOST_CHECK_EQUAL(lhs.min_durations[function_id], rhs.min_durations[function_id]);
+        BOOST_CHECK_EQUAL(lhs.freeflow_durations[function_id], rhs.freeflow_durations[function_id]);
+        BOOST_CHECK_EQUAL(lhs.profile_flags[function_id], rhs.profile_flags[function_id]);
+
+        for (std::uint32_t bucket = 0; bucket < lhs.meta.week_bucket_count; ++bucket)
+        {
+            BOOST_CHECK_EQUAL(from_alias<std::int32_t>(
+                                  lhs.GetDuration(static_cast<TemporalFunctionID>(function_id),
+                                                  bucket)),
+                              from_alias<std::int32_t>(
+                                  rhs.GetDuration(static_cast<TemporalFunctionID>(function_id),
+                                                  bucket)));
+        }
+    }
+}
+
+void CheckTemporalMetricEquivalent(const TemporalCellMetric &lhs, const TemporalCellMetric &rhs)
+{
+    BOOST_REQUIRE_EQUAL(lhs.function_ids.size(), rhs.function_ids.size());
+    BOOST_REQUIRE_EQUAL(lhs.min_durations.size(), rhs.min_durations.size());
+
+    for (std::size_t index = 0; index < lhs.function_ids.size(); ++index)
+    {
+        BOOST_CHECK_EQUAL(lhs.function_ids[index], rhs.function_ids[index]);
+        BOOST_CHECK_EQUAL(from_alias<std::int32_t>(lhs.min_durations[index]),
+                          from_alias<std::int32_t>(rhs.min_durations[index]));
+    }
+}
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(temporal_cell_customization)
@@ -428,6 +472,122 @@ BOOST_AUTO_TEST_CASE(temporal_cell_customization_can_limit_selected_levels)
 
     const auto level_two_cell = temporal_metric.GetCell(cell_storage, 2, 0);
     BOOST_CHECK_EQUAL(FindFunctionID(level_two_cell, 0, 3), INVALID_TEMPORAL_FUNCTION_ID);
+}
+
+BOOST_AUTO_TEST_CASE(parallel_temporal_cell_customization_matches_serial_reference_across_chunks)
+{
+    std::vector<CellID> l1;
+    l1.reserve(80);
+    std::vector<MockEdge> edges;
+    for (CellID cell = 0; cell < 40; ++cell)
+    {
+        l1.push_back(cell);
+        l1.push_back(cell);
+
+        const auto a = static_cast<NodeID>(cell * 2);
+        const auto b = static_cast<NodeID>(cell * 2 + 1);
+        edges.push_back({a, b, EdgeWeight{1}});
+        if (cell + 1 < 40)
+        {
+            edges.push_back({b, static_cast<NodeID>((cell + 1) * 2), EdgeWeight{1}});
+        }
+    }
+    MultiLevelPartition mlp{{l1}, {40}};
+
+    auto graph = makeGraph(mlp, edges);
+    std::vector<bool> allowed_nodes(graph.GetNumberOfNodes(), true);
+
+    CellStorage cell_storage(mlp, graph);
+    auto serial_metric = MakeTemporalCellMetric(cell_storage);
+    auto parallel_metric = MakeTemporalCellMetric(cell_storage);
+    TemporalFunctionStorage serial_storage;
+    TemporalFunctionStorage parallel_storage;
+    serial_storage.meta.bucket_size_minutes = 5;
+    serial_storage.meta.week_bucket_count = 4;
+    serial_storage.meta.encoding_version = TEMPORAL_FUNCTION_ENCODING_VERSION_DENSE;
+    parallel_storage.meta = serial_storage.meta;
+
+    MockTemporalEvaluator evaluator;
+    for (CellID cell = 0; cell < 40; ++cell)
+    {
+        const auto a = static_cast<NodeID>(cell * 2);
+        const auto b = static_cast<NodeID>(cell * 2 + 1);
+        const auto base = static_cast<EdgeDuration::value_type>(1 + (cell % 4));
+        evaluator.durations[{a, b}] = {base, static_cast<EdgeDuration::value_type>(base + 1),
+                                       static_cast<EdgeDuration::value_type>(base + 2),
+                                       static_cast<EdgeDuration::value_type>(base + 3)};
+        evaluator.durations[{b, a}] = evaluator.durations[{a, b}];
+
+        if (cell + 1 < 40)
+        {
+            const auto next = static_cast<NodeID>((cell + 1) * 2);
+            const auto jump = static_cast<EdgeDuration::value_type>(5 + (cell % 3));
+            evaluator.durations[{b, next}] = {jump, jump, jump, jump};
+            evaluator.durations[{next, b}] = evaluator.durations[{b, next}];
+        }
+    }
+
+    TemporalCellCustomizer customizer(mlp);
+    customizer.CustomizeSerial(
+        graph, cell_storage, allowed_nodes, evaluator, serial_metric, serial_storage);
+    customizer.Customize(
+        graph, cell_storage, allowed_nodes, evaluator, parallel_metric, parallel_storage);
+
+    CheckTemporalMetricEquivalent(serial_metric, parallel_metric);
+    CheckTemporalStorageEquivalent(serial_storage, parallel_storage);
+}
+
+BOOST_AUTO_TEST_CASE(parallel_temporal_cell_customization_matches_serial_reference_with_dct_shortcuts)
+{
+    std::vector<CellID> l1{{0, 0, 1, 1, 2, 2}};
+    std::vector<CellID> l2{{0, 0, 0, 0, 1, 1}};
+    std::vector<CellID> l3{{0, 0, 0, 0, 0, 0}};
+    MultiLevelPartition mlp{{l1, l2, l3}, {3, 2, 1}};
+
+    const std::vector<MockEdge> edges = {
+        {0, 1, EdgeWeight{1}},
+        {1, 2, EdgeWeight{1}},
+        {2, 3, EdgeWeight{1}},
+        {4, 5, EdgeWeight{1}},
+        {0, 4, EdgeWeight{1}},
+        {3, 4, EdgeWeight{1}},
+    };
+
+    auto graph = makeGraph(mlp, edges);
+    std::vector<bool> allowed_nodes(graph.GetNumberOfNodes(), true);
+
+    CellStorage cell_storage(mlp, graph);
+    auto serial_metric = MakeTemporalCellMetric(cell_storage);
+    auto parallel_metric = MakeTemporalCellMetric(cell_storage);
+    TemporalFunctionStorage serial_storage;
+    TemporalFunctionStorage parallel_storage;
+    serial_storage.meta.bucket_size_minutes = 5;
+    serial_storage.meta.week_bucket_count = 4;
+    serial_storage.meta.encoding_version = TEMPORAL_FUNCTION_ENCODING_VERSION_DCT;
+    parallel_storage.meta = serial_storage.meta;
+
+    MockTemporalEvaluator evaluator;
+    evaluator.durations[{0, 1}] = {1, 2, 3, 4};
+    evaluator.durations[{1, 0}] = {1, 2, 3, 4};
+    evaluator.durations[{1, 2}] = {10, 10, 10, 10};
+    evaluator.durations[{2, 1}] = {10, 10, 10, 10};
+    evaluator.durations[{2, 3}] = {2, 2, 2, 2};
+    evaluator.durations[{3, 2}] = {2, 2, 2, 2};
+    evaluator.durations[{4, 5}] = {1, 1, 1, 1};
+    evaluator.durations[{5, 4}] = {1, 1, 1, 1};
+    evaluator.durations[{0, 4}] = {100, 100, 100, 100};
+    evaluator.durations[{4, 0}] = {100, 100, 100, 100};
+    evaluator.durations[{3, 4}] = {100, 100, 100, 100};
+    evaluator.durations[{4, 3}] = {100, 100, 100, 100};
+
+    TemporalCellCustomizer customizer(mlp, 4);
+    customizer.CustomizeSerial(
+        graph, cell_storage, allowed_nodes, evaluator, serial_metric, serial_storage);
+    customizer.Customize(
+        graph, cell_storage, allowed_nodes, evaluator, parallel_metric, parallel_storage);
+
+    CheckTemporalMetricEquivalent(serial_metric, parallel_metric);
+    CheckTemporalStorageEquivalent(serial_storage, parallel_storage);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

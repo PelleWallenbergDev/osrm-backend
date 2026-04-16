@@ -5,14 +5,20 @@
 #include "engine/temporal/temporal_profile_decoder.hpp"
 #include "partitioner/cell_storage.hpp"
 #include "partitioner/multi_level_partition.hpp"
+#include "util/log.hpp"
 #include "util/query_heap.hpp"
 
 #include <boost/assert.hpp>
 
+#include <tbb/enumerable_thread_specific.h>
+#include <tbb/parallel_for.h>
+
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <optional>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -37,6 +43,27 @@ class TemporalCellCustomizer
         bool from_clique = false;
     };
 
+    struct PreparedFunctionData
+    {
+        EdgeDuration minimum_duration{INVALID_EDGE_DURATION};
+        EdgeDuration freeflow_duration{INVALID_EDGE_DURATION};
+        TemporalFunctionFlags flags{TEMPORAL_FUNCTION_FLAG_NONE};
+        std::vector<TemporalFunctionBucketValue> values;
+        std::vector<TemporalFunctionCoeffValue> coeffs;
+    };
+
+    struct ComputedMetricEntry
+    {
+        std::size_t metric_index = 0;
+        std::optional<PreparedFunctionData> function;
+    };
+
+    struct ComputedCellResult
+    {
+        std::uint64_t processed_source_rows = 0;
+        std::vector<ComputedMetricEntry> entries;
+    };
+
     static EdgeDuration SafeAddDuration(const EdgeDuration lhs, const EdgeDuration rhs)
     {
         if (lhs == INVALID_EDGE_DURATION || rhs == INVALID_EDGE_DURATION)
@@ -50,15 +77,15 @@ class TemporalCellCustomizer
         return EdgeDuration{static_cast<EdgeDuration::value_type>(clamped)};
     }
 
-    static DeduplicatedFunctionKey MakeFunctionKey(
-        const TemporalFunctionStorage &storage,
-        const EdgeDuration minimum_duration,
-        const EdgeDuration freeflow_duration,
-        const TemporalFunctionFlags flags,
-        std::vector<TemporalFunctionBucketValue> values,
-        std::vector<TemporalFunctionCoeffValue> coeffs)
+    static DeduplicatedFunctionKey
+    MakeFunctionKey(const std::uint32_t encoding_version,
+                    const EdgeDuration minimum_duration,
+                    const EdgeDuration freeflow_duration,
+                    const TemporalFunctionFlags flags,
+                    std::vector<TemporalFunctionBucketValue> values,
+                    std::vector<TemporalFunctionCoeffValue> coeffs)
     {
-        return {storage.meta.encoding_version,
+        return {encoding_version,
                 from_alias<TemporalFunctionDurationValue>(minimum_duration),
                 from_alias<TemporalFunctionDurationValue>(freeflow_duration),
                 flags,
@@ -90,7 +117,7 @@ class TemporalCellCustomizer
             }
 
             deduplicated_functions.emplace(
-                MakeFunctionKey(storage,
+                MakeFunctionKey(storage.meta.encoding_version,
                                 storage.GetMinDuration(function_id),
                                 storage.GetFreeFlowDuration(function_id),
                                 storage.GetFlags(function_id),
@@ -100,6 +127,33 @@ class TemporalCellCustomizer
         }
 
         return deduplicated_functions;
+    }
+
+    template <typename EvaluatorT>
+    static void InitializeStorageMeta(TemporalFunctionStorage &storage, const EvaluatorT &evaluator)
+    {
+        if (storage.meta.week_bucket_count == 0)
+        {
+            storage.meta.week_bucket_count = evaluator.GetWeekBucketCount();
+        }
+        else
+        {
+            BOOST_ASSERT(storage.meta.week_bucket_count == evaluator.GetWeekBucketCount());
+        }
+
+        if (storage.meta.bucket_size_minutes == 0)
+        {
+            storage.meta.bucket_size_minutes = evaluator.GetBucketSizeMinutes();
+        }
+        else
+        {
+            BOOST_ASSERT(storage.meta.bucket_size_minutes == evaluator.GetBucketSizeMinutes());
+        }
+
+        if (storage.meta.encoding_version == 0)
+        {
+            storage.meta.encoding_version = TEMPORAL_FUNCTION_ENCODING_VERSION_DENSE;
+        }
     }
 
     static void EnsureFunctionMetadataAlignment(TemporalFunctionStorage &storage)
@@ -114,22 +168,24 @@ class TemporalCellCustomizer
         storage.profile_flags.resize(function_count, TEMPORAL_FUNCTION_FLAG_NONE);
     }
 
-    TemporalFunctionID AppendFunction(TemporalFunctionStorage &storage,
-                                      DeduplicatedFunctionIndex &deduplicated_functions,
-                                      const std::vector<TemporalFunctionBucketValue> &profile) const
+    PreparedFunctionData
+    PrepareFunction(const TemporalFunctionMeta &meta,
+                    std::vector<TemporalFunctionBucketValue> profile) const
     {
         BOOST_ASSERT(!profile.empty());
-        BOOST_ASSERT(storage.meta.week_bucket_count == profile.size());
+        BOOST_ASSERT(meta.week_bucket_count == profile.size());
 
-        const auto minimum_duration = EdgeDuration{*std::min_element(profile.begin(), profile.end())};
-        const auto freeflow_duration = minimum_duration;
-        auto flags = TEMPORAL_FUNCTION_FLAG_NONE;
-        if (engine::temporal::IsTemporalFunctionFIFO(profile, storage.meta.bucket_size_minutes))
+        PreparedFunctionData prepared;
+        prepared.minimum_duration =
+            EdgeDuration{*std::min_element(profile.begin(), profile.end())};
+        prepared.freeflow_duration = prepared.minimum_duration;
+
+        if (engine::temporal::IsTemporalFunctionFIFO(profile, meta.bucket_size_minutes))
         {
-            flags |= TEMPORAL_FUNCTION_FLAG_FIFO_VALID;
+            prepared.flags |= TEMPORAL_FUNCTION_FLAG_FIFO_VALID;
         }
 
-        if (storage.meta.encoding_version == TEMPORAL_FUNCTION_ENCODING_VERSION_DCT)
+        if (meta.encoding_version == TEMPORAL_FUNCTION_ENCODING_VERSION_DCT)
         {
             const auto coeff_target =
                 preferred_coeff_count == 0
@@ -140,40 +196,28 @@ class TemporalCellCustomizer
                 profile, coeff_target, max_mean_abs_error, max_bucket_abs_error);
             if (compression.used_fallback_coeff_count)
             {
-                flags |= TEMPORAL_FUNCTION_FLAG_USED_FALLBACK_COEFF_COUNT;
+                prepared.flags |= TEMPORAL_FUNCTION_FLAG_USED_FALLBACK_COEFF_COUNT;
             }
-
-            auto key = MakeFunctionKey(storage,
-                                       minimum_duration,
-                                       freeflow_duration,
-                                       flags,
-                                       {},
-                                       compression.coefficients);
-            const auto existing = deduplicated_functions.find(key);
-            if (existing != deduplicated_functions.end())
-            {
-                return existing->second;
-            }
-
-            const auto function_id = static_cast<TemporalFunctionID>(storage.profile_offsets.size());
-            EnsureFunctionMetadataAlignment(storage);
-            storage.min_durations.push_back(from_alias<TemporalFunctionDurationValue>(minimum_duration));
-            storage.freeflow_durations.push_back(
-                from_alias<TemporalFunctionDurationValue>(freeflow_duration));
-            storage.profile_flags.push_back(flags);
-
-            storage.profile_offsets.push_back(storage.coeffs.size());
-            storage.profile_sizes.push_back(
-                static_cast<std::uint32_t>(compression.coefficients.size()));
-            storage.coeffs.insert(storage.coeffs.end(),
-                                  compression.coefficients.begin(),
-                                  compression.coefficients.end());
-            deduplicated_functions.emplace(std::move(key), function_id);
-            return function_id;
+            prepared.coeffs = std::move(compression.coefficients);
+        }
+        else
+        {
+            prepared.values = std::move(profile);
         }
 
-        auto key = MakeFunctionKey(
-            storage, minimum_duration, freeflow_duration, flags, {profile.begin(), profile.end()}, {});
+        return prepared;
+    }
+
+    TemporalFunctionID AppendPreparedFunction(TemporalFunctionStorage &storage,
+                                              DeduplicatedFunctionIndex &deduplicated_functions,
+                                              PreparedFunctionData prepared) const
+    {
+        auto key = MakeFunctionKey(storage.meta.encoding_version,
+                                   prepared.minimum_duration,
+                                   prepared.freeflow_duration,
+                                   prepared.flags,
+                                   std::move(prepared.values),
+                                   std::move(prepared.coeffs));
         const auto existing = deduplicated_functions.find(key);
         if (existing != deduplicated_functions.end())
         {
@@ -182,14 +226,39 @@ class TemporalCellCustomizer
 
         const auto function_id = static_cast<TemporalFunctionID>(storage.profile_offsets.size());
         EnsureFunctionMetadataAlignment(storage);
-        storage.min_durations.push_back(from_alias<TemporalFunctionDurationValue>(minimum_duration));
-        storage.freeflow_durations.push_back(from_alias<TemporalFunctionDurationValue>(freeflow_duration));
-        storage.profile_flags.push_back(flags);
-        storage.profile_offsets.push_back(storage.values.size());
-        storage.profile_sizes.push_back(static_cast<std::uint32_t>(profile.size()));
-        storage.values.insert(storage.values.end(), profile.begin(), profile.end());
+        storage.min_durations.push_back(std::get<1>(key));
+        storage.freeflow_durations.push_back(std::get<2>(key));
+        storage.profile_flags.push_back(std::get<3>(key));
+
+        if (storage.meta.encoding_version == TEMPORAL_FUNCTION_ENCODING_VERSION_DCT)
+        {
+            const auto &coeffs = std::get<5>(key);
+            storage.profile_offsets.push_back(storage.coeffs.size());
+            storage.profile_sizes.push_back(static_cast<std::uint32_t>(coeffs.size()));
+            storage.coeffs.insert(storage.coeffs.end(), coeffs.begin(), coeffs.end());
+        }
+        else
+        {
+            const auto &values = std::get<4>(key);
+            storage.profile_offsets.push_back(storage.values.size());
+            storage.profile_sizes.push_back(static_cast<std::uint32_t>(values.size()));
+            storage.values.insert(storage.values.end(), values.begin(), values.end());
+        }
+
         deduplicated_functions.emplace(std::move(key), function_id);
         return function_id;
+    }
+
+    TemporalFunctionID AppendFunction(TemporalFunctionStorage &storage,
+                                      DeduplicatedFunctionIndex &deduplicated_functions,
+                                      const std::vector<TemporalFunctionBucketValue> &profile) const
+    {
+        return AppendPreparedFunction(
+            storage,
+            deduplicated_functions,
+            PrepareFunction(storage.meta,
+                            std::vector<TemporalFunctionBucketValue>(profile.begin(),
+                                                                     profile.end())));
     }
 
     template <typename GraphT, typename EvaluatorT>
@@ -293,6 +362,18 @@ class TemporalCellCustomizer
     using Heap =
         util::QueryHeap<NodeID, NodeID, EdgeDuration, HeapData, util::ArrayStorage<NodeID, int>>;
 
+  private:
+    struct WorkerState
+    {
+        explicit WorkerState(const NodeID number_of_nodes) : heap(number_of_nodes) {}
+
+        Heap heap;
+    };
+
+    static constexpr std::size_t PARALLEL_CELL_CHUNK_SIZE = 32;
+
+  public:
+
     explicit TemporalCellCustomizer(const partitioner::MultiLevelPartition &partition_,
                                     const std::uint32_t preferred_coeff_count_ = 0,
                                     const float max_mean_abs_error_ = 1.0F,
@@ -314,17 +395,11 @@ class TemporalCellCustomizer
                    const LevelID level,
                    const CellID id) const
     {
+        InitializeStorageMeta(storage, evaluator);
         auto deduplicated_functions = BuildDeduplicatedFunctionIndex(storage);
-        CustomizeCell(graph,
-                      heap,
-                      cells,
-                      allowed_nodes,
-                      evaluator,
-                      metric,
-                      storage,
-                      deduplicated_functions,
-                      level,
-                      id);
+        auto computed =
+            ComputeCell(graph, heap, cells, allowed_nodes, evaluator, metric, storage, level, id);
+        CommitCellResult(metric, storage, deduplicated_functions, std::move(computed));
     }
 
     template <typename GraphT, typename EvaluatorT>
@@ -339,33 +414,30 @@ class TemporalCellCustomizer
                        const LevelID level,
                        const CellID id) const
     {
-        if (storage.meta.week_bucket_count == 0)
-        {
-            storage.meta.week_bucket_count = evaluator.GetWeekBucketCount();
-        }
-        else
-        {
-            BOOST_ASSERT(storage.meta.week_bucket_count == evaluator.GetWeekBucketCount());
-        }
+        InitializeStorageMeta(storage, evaluator);
+        auto computed =
+            ComputeCell(graph, heap, cells, allowed_nodes, evaluator, metric, storage, level, id);
+        CommitCellResult(metric, storage, deduplicated_functions, std::move(computed));
+    }
 
-        if (storage.meta.bucket_size_minutes == 0)
-        {
-            storage.meta.bucket_size_minutes = evaluator.GetBucketSizeMinutes();
-        }
-        else
-        {
-            BOOST_ASSERT(storage.meta.bucket_size_minutes == evaluator.GetBucketSizeMinutes());
-        }
-
-        if (storage.meta.encoding_version == 0)
-        {
-            storage.meta.encoding_version = TEMPORAL_FUNCTION_ENCODING_VERSION_DENSE;
-        }
-
+    template <typename GraphT, typename EvaluatorT>
+    ComputedCellResult ComputeCell(const GraphT &graph,
+                                   Heap &heap,
+                                   const partitioner::CellStorage &cells,
+                                   const std::vector<bool> &allowed_nodes,
+                                   const EvaluatorT &evaluator,
+                                   const TemporalCellMetric &metric,
+                                   const TemporalFunctionStorage &storage,
+                                   const LevelID level,
+                                   const CellID id) const
+    {
+        ComputedCellResult result;
         const auto cell = cells.GetUnfilledCell(level, id);
         const auto &cell_data = cells.GetCellData(level, id);
         const auto destinations = cell.GetDestinationNodes();
+        const auto sources = cell.GetSourceNodes();
         std::vector<NodeID> destination_nodes(destinations.begin(), destinations.end());
+        const auto destination_count = destination_nodes.size();
         std::unordered_map<NodeID, std::size_t> destination_lookup;
         destination_lookup.reserve(destination_nodes.size());
         for (std::size_t destination_index = 0; destination_index < destination_nodes.size();
@@ -375,24 +447,24 @@ class TemporalCellCustomizer
         }
 
         const auto bucket_count = storage.meta.week_bucket_count;
-        for (const auto source : cell.GetSourceNodes())
+        result.processed_source_rows =
+            static_cast<std::uint64_t>(std::distance(sources.begin(), sources.end()));
+        result.entries.reserve(static_cast<std::size_t>(result.processed_source_rows) *
+                               destination_count);
+
+        std::size_t source_index = 0;
+        for (const auto source : sources)
         {
             const auto row_offset = static_cast<std::size_t>(cell_data.value_offset) +
-                                    static_cast<std::size_t>(
-                                        std::distance(cell.GetSourceNodes().begin(),
-                                                      std::find(cell.GetSourceNodes().begin(),
-                                                                cell.GetSourceNodes().end(),
-                                                                source))) *
-                                        destination_nodes.size();
+                                    source_index * destination_count;
+            ++source_index;
 
             if (!allowed_nodes[source])
             {
                 for (std::size_t destination_index = 0; destination_index < destination_nodes.size();
                      ++destination_index)
                 {
-                    metric.function_ids[row_offset + destination_index] =
-                        INVALID_TEMPORAL_FUNCTION_ID;
-                    metric.min_durations[row_offset + destination_index] = INVALID_EDGE_DURATION;
+                    result.entries.push_back({row_offset + destination_index, std::nullopt});
                 }
                 continue;
             }
@@ -450,16 +522,36 @@ class TemporalCellCustomizer
                 const auto metric_index = row_offset + destination_index;
                 if (has_invalid_bucket)
                 {
-                    metric.function_ids[metric_index] = INVALID_TEMPORAL_FUNCTION_ID;
-                    metric.min_durations[metric_index] = INVALID_EDGE_DURATION;
+                    result.entries.push_back({metric_index, std::nullopt});
                     continue;
                 }
 
-                const auto function_id =
-                    AppendFunction(storage, deduplicated_functions, profile);
-                metric.function_ids[metric_index] = function_id;
-                metric.min_durations[metric_index] = storage.GetMinDuration(function_id);
+                result.entries.push_back(
+                    {metric_index, PrepareFunction(storage.meta, std::move(profile))});
             }
+        }
+
+        return result;
+    }
+
+    void CommitCellResult(TemporalCellMetric &metric,
+                          TemporalFunctionStorage &storage,
+                          DeduplicatedFunctionIndex &deduplicated_functions,
+                          ComputedCellResult result) const
+    {
+        for (auto &entry : result.entries)
+        {
+            if (!entry.function)
+            {
+                metric.function_ids[entry.metric_index] = INVALID_TEMPORAL_FUNCTION_ID;
+                metric.min_durations[entry.metric_index] = INVALID_EDGE_DURATION;
+                continue;
+            }
+
+            const auto function_id =
+                AppendPreparedFunction(storage, deduplicated_functions, std::move(*entry.function));
+            metric.function_ids[entry.metric_index] = function_id;
+            metric.min_durations[entry.metric_index] = storage.GetMinDuration(function_id);
         }
     }
 
@@ -479,6 +571,21 @@ class TemporalCellCustomizer
     }
 
     template <typename GraphT, typename EvaluatorT>
+    void CustomizeSerial(const GraphT &graph,
+                         const partitioner::CellStorage &cells,
+                         const std::vector<bool> &allowed_nodes,
+                         const EvaluatorT &evaluator,
+                         TemporalCellMetric &metric,
+                         TemporalFunctionStorage &storage) const
+    {
+        const auto max_level = partition.GetNumberOfLevels() > 0
+                                   ? static_cast<LevelID>(partition.GetNumberOfLevels() - 1)
+                                   : LevelID{0};
+        CustomizeSerial(
+            graph, cells, allowed_nodes, evaluator, metric, storage, LevelID{1}, max_level);
+    }
+
+    template <typename GraphT, typename EvaluatorT>
     void Customize(const GraphT &graph,
                    const partitioner::CellStorage &cells,
                    const std::vector<bool> &allowed_nodes,
@@ -488,8 +595,12 @@ class TemporalCellCustomizer
                    const LevelID first_level,
                    const LevelID last_level) const
     {
-        Heap heap(graph.GetNumberOfNodes());
-        auto deduplicated_functions = BuildDeduplicatedFunctionIndex(storage);
+        InitializeStorageMeta(storage, evaluator);
+
+        if (partition.GetNumberOfLevels() <= 1)
+        {
+            return;
+        }
 
         const auto begin_level =
             std::max<std::size_t>(1UL, static_cast<std::size_t>(first_level));
@@ -497,25 +608,129 @@ class TemporalCellCustomizer
             std::min<std::size_t>(partition.GetNumberOfLevels() - 1,
                                   static_cast<std::size_t>(last_level));
 
-        if (partition.GetNumberOfLevels() <= 1 || begin_level > end_level)
+        if (begin_level > end_level)
         {
             return;
         }
 
+        using WorkerStates = tbb::enumerable_thread_specific<WorkerState>;
+        WorkerStates workers([&graph]() { return WorkerState{graph.GetNumberOfNodes()}; });
+        auto deduplicated_functions = BuildDeduplicatedFunctionIndex(storage);
+
         for (std::size_t level = begin_level; level <= end_level; ++level)
         {
-            for (std::size_t id = 0; id < partition.GetNumberOfCells(level); ++id)
+            const auto level_cell_count =
+                static_cast<std::size_t>(partition.GetNumberOfCells(static_cast<LevelID>(level)));
+            const auto level_start = std::chrono::steady_clock::now();
+            const auto log_interval = std::max<std::size_t>(1, level_cell_count / 20);
+            std::uint64_t processed_source_rows = 0;
+
+            util::Log() << "Temporal overlay customization: starting level " << level
+                        << " with " << level_cell_count << " cell(s), bucket_count="
+                        << storage.meta.week_bucket_count << ", function_count="
+                        << storage.profile_offsets.size();
+
+            for (std::size_t chunk_begin = 0; chunk_begin < level_cell_count;
+                 chunk_begin += PARALLEL_CELL_CHUNK_SIZE)
             {
-                CustomizeCell(graph,
-                              heap,
-                              cells,
-                              allowed_nodes,
-                              evaluator,
-                              metric,
-                              storage,
-                              deduplicated_functions,
-                              level,
-                              id);
+                const auto chunk_end = std::min<std::size_t>(
+                    level_cell_count, chunk_begin + PARALLEL_CELL_CHUNK_SIZE);
+                std::vector<ComputedCellResult> computed_cells(chunk_end - chunk_begin);
+
+                tbb::parallel_for(
+                    tbb::blocked_range<std::size_t>(chunk_begin, chunk_end),
+                    [&](const tbb::blocked_range<std::size_t> &range)
+                    {
+                        auto &worker = workers.local();
+                        for (auto id = range.begin(); id != range.end(); ++id)
+                        {
+                            computed_cells[id - chunk_begin] =
+                                ComputeCell(graph,
+                                            worker.heap,
+                                            cells,
+                                            allowed_nodes,
+                                            evaluator,
+                                            metric,
+                                            storage,
+                                            static_cast<LevelID>(level),
+                                            static_cast<CellID>(id));
+                        }
+                    });
+
+                std::uint64_t chunk_processed_source_rows = 0;
+                for (auto &computed : computed_cells)
+                {
+                    chunk_processed_source_rows += computed.processed_source_rows;
+                    CommitCellResult(
+                        metric, storage, deduplicated_functions, std::move(computed));
+                }
+
+                processed_source_rows += chunk_processed_source_rows;
+                const auto completed_cells = chunk_end;
+                const auto crossed_interval =
+                    chunk_begin / log_interval != (completed_cells - 1) / log_interval;
+                if (completed_cells == level_cell_count || crossed_interval)
+                {
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                             std::chrono::steady_clock::now() - level_start)
+                                             .count();
+                    util::Log() << "Temporal overlay customization: level " << level
+                                << " progress " << completed_cells << "/" << level_cell_count
+                                << " cell(s), processed_source_rows=" << processed_source_rows
+                                << ", function_count=" << storage.profile_offsets.size()
+                                << ", elapsed=" << elapsed << "s";
+                }
+            }
+        }
+    }
+
+    template <typename GraphT, typename EvaluatorT>
+    void CustomizeSerial(const GraphT &graph,
+                         const partitioner::CellStorage &cells,
+                         const std::vector<bool> &allowed_nodes,
+                         const EvaluatorT &evaluator,
+                         TemporalCellMetric &metric,
+                         TemporalFunctionStorage &storage,
+                         const LevelID first_level,
+                         const LevelID last_level) const
+    {
+        InitializeStorageMeta(storage, evaluator);
+
+        if (partition.GetNumberOfLevels() <= 1)
+        {
+            return;
+        }
+
+        const auto begin_level =
+            std::max<std::size_t>(1UL, static_cast<std::size_t>(first_level));
+        const auto end_level =
+            std::min<std::size_t>(partition.GetNumberOfLevels() - 1,
+                                  static_cast<std::size_t>(last_level));
+
+        if (begin_level > end_level)
+        {
+            return;
+        }
+
+        Heap heap(graph.GetNumberOfNodes());
+        auto deduplicated_functions = BuildDeduplicatedFunctionIndex(storage);
+
+        for (std::size_t level = begin_level; level <= end_level; ++level)
+        {
+            const auto level_cell_count =
+                static_cast<std::size_t>(partition.GetNumberOfCells(static_cast<LevelID>(level)));
+            for (std::size_t id = 0; id < level_cell_count; ++id)
+            {
+                auto computed = ComputeCell(graph,
+                                            heap,
+                                            cells,
+                                            allowed_nodes,
+                                            evaluator,
+                                            metric,
+                                            storage,
+                                            static_cast<LevelID>(level),
+                                            static_cast<CellID>(id));
+                CommitCellResult(metric, storage, deduplicated_functions, std::move(computed));
             }
         }
     }
