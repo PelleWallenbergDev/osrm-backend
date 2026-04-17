@@ -14,6 +14,8 @@
 namespace
 {
 using namespace osrm;
+using TemporalShortcutRowView =
+    engine::datafacade::AlgorithmDataFacade<engine::datafacade::MLD>::TemporalShortcutRowView;
 
 struct MockPartition
 {
@@ -84,6 +86,8 @@ struct MockFacade
     std::vector<std::vector<SegmentDuration>> static_durations;
     std::vector<std::vector<EdgeDuration>> temporal_durations;
     std::vector<EdgeDuration> overlay_shortcut;
+    std::array<customizer::TemporalFunctionID, 1> overlay_function_ids{{0}};
+    std::array<EdgeDuration, 1> overlay_min_durations{{EdgeDuration{15}}};
 
     MockFacade() : border_edges{}
     {
@@ -223,6 +227,30 @@ struct MockFacade
         return *std::min_element(overlay_shortcut.begin(), overlay_shortcut.end());
     }
 
+    TemporalShortcutRowView GetTemporalShortcutRow(LevelID level, CellID cell_id, NodeID from) const
+    {
+        if (level != 1 || cell_id != 0 || from != 0)
+        {
+            return {};
+        }
+
+        return {cells.level_one_cell.destination_nodes.data(),
+                overlay_function_ids.data(),
+                overlay_min_durations.data(),
+                overlay_function_ids.size()};
+    }
+
+    EdgeDuration GetTemporalFunctionDuration(customizer::TemporalFunctionID function_id,
+                                             std::uint32_t week_bucket) const
+    {
+        if (function_id != 0)
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        return overlay_shortcut[week_bucket];
+    }
+
     EdgeID FindEdge(NodeID from, NodeID to) const
     {
         for (const auto edge : border_edges[0][from])
@@ -286,6 +314,8 @@ struct ArrivalSensitiveFacade
     std::vector<std::vector<SegmentDuration>> static_durations;
     std::vector<std::vector<EdgeDuration>> temporal_durations;
     std::vector<EdgeDuration> overlay_shortcut;
+    std::array<customizer::TemporalFunctionID, 1> overlay_function_ids{{0}};
+    std::array<EdgeDuration, 1> overlay_min_durations{{EdgeDuration{200}}};
 
     ArrivalSensitiveFacade() : border_edges{}
     {
@@ -439,6 +469,30 @@ struct ArrivalSensitiveFacade
         }
 
         return *std::min_element(overlay_shortcut.begin(), overlay_shortcut.end());
+    }
+
+    TemporalShortcutRowView GetTemporalShortcutRow(LevelID level, CellID cell_id, NodeID from) const
+    {
+        if (level != 1 || cell_id != 0 || from != 1)
+        {
+            return {};
+        }
+
+        return {cells.level_one_cell.destination_nodes.data(),
+                overlay_function_ids.data(),
+                overlay_min_durations.data(),
+                overlay_function_ids.size()};
+    }
+
+    EdgeDuration GetTemporalFunctionDuration(customizer::TemporalFunctionID function_id,
+                                             std::uint32_t week_bucket) const
+    {
+        if (function_id != 0)
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        return overlay_shortcut[week_bucket];
     }
 
     EdgeID FindEdge(NodeID from, NodeID to) const
@@ -643,6 +697,8 @@ struct StaticTemporalDivergenceFacade
     std::vector<std::vector<SegmentDuration>> static_durations;
     std::vector<std::vector<EdgeDuration>> temporal_durations;
     std::vector<EdgeDuration> overlay_shortcut;
+    std::array<customizer::TemporalFunctionID, 1> overlay_function_ids{{0}};
+    std::array<EdgeDuration, 1> overlay_min_durations{{EdgeDuration{20}}};
 
     StaticTemporalDivergenceFacade() : border_edges{}
     {
@@ -788,6 +844,30 @@ struct StaticTemporalDivergenceFacade
         return *std::min_element(overlay_shortcut.begin(), overlay_shortcut.end());
     }
 
+    TemporalShortcutRowView GetTemporalShortcutRow(LevelID level, CellID cell_id, NodeID from) const
+    {
+        if (level != 1 || cell_id != 0 || from != 1)
+        {
+            return {};
+        }
+
+        return {cells.level_one_cell.destination_nodes.data(),
+                overlay_function_ids.data(),
+                overlay_min_durations.data(),
+                overlay_function_ids.size()};
+    }
+
+    EdgeDuration GetTemporalFunctionDuration(customizer::TemporalFunctionID function_id,
+                                             std::uint32_t week_bucket) const
+    {
+        if (function_id != 0)
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        return overlay_shortcut[week_bucket];
+    }
+
     EdgeID FindEdge(NodeID from, NodeID to) const
     {
         for (const auto edge : border_edges[0][from])
@@ -804,6 +884,8 @@ struct StaticTemporalDivergenceFacade
 
 struct MissingShortcutFallbackFacade : StaticTemporalDivergenceFacade
 {
+    TemporalShortcutRowView GetTemporalShortcutRow(LevelID, CellID, NodeID) const { return {}; }
+
     EdgeDuration GetTemporalShortcutDuration(LevelID,
                                              CellID,
                                              NodeID,

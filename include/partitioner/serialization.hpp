@@ -44,9 +44,15 @@ inline void read(storage::tar::FileReader &reader,
     storage::serialization::read(reader, name + "/source_boundary", storage.source_boundary);
     storage::serialization::read(
         reader, name + "/destination_boundary", storage.destination_boundary);
+    storage::serialization::read(
+        reader, name + "/source_boundary_index", storage.source_boundary_index);
+    storage::serialization::read(
+        reader, name + "/destination_boundary_index", storage.destination_boundary_index);
     storage::serialization::read(reader, name + "/cells", storage.cells);
     storage::serialization::read(
         reader, name + "/level_to_cell_offset", storage.level_to_cell_offset);
+    storage::serialization::read(
+        reader, name + "/level_to_boundary_index_offset", storage.level_to_boundary_index_offset);
 }
 
 template <storage::Ownership Ownership>
@@ -57,9 +63,15 @@ inline void write(storage::tar::FileWriter &writer,
     storage::serialization::write(writer, name + "/source_boundary", storage.source_boundary);
     storage::serialization::write(
         writer, name + "/destination_boundary", storage.destination_boundary);
+    storage::serialization::write(
+        writer, name + "/source_boundary_index", storage.source_boundary_index);
+    storage::serialization::write(
+        writer, name + "/destination_boundary_index", storage.destination_boundary_index);
     storage::serialization::write(writer, name + "/cells", storage.cells);
     storage::serialization::write(
         writer, name + "/level_to_cell_offset", storage.level_to_cell_offset);
+    storage::serialization::write(
+        writer, name + "/level_to_boundary_index_offset", storage.level_to_boundary_index_offset);
 }
 } // namespace osrm::partitioner::serialization
 

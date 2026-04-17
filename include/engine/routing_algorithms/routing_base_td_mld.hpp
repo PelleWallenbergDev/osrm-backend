@@ -397,19 +397,30 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
         if (current_level >= 1 && !from_clique_arc[current.node])
         {
             const auto cell_id = partition.GetCell(current_level, current.node);
-            const auto cell = cells.GetUnfilledCell(current_level, cell_id);
             const auto week_bucket = GetWeekBucketForClock(facade, current_clock);
+            const auto shortcut_row =
+                facade.GetTemporalShortcutRow(current_level, cell_id, current.node);
 
-            for (const auto destination : cell.GetDestinationNodes())
+            for (std::size_t destination_index = 0; destination_index < shortcut_row.size;
+                 ++destination_index)
             {
+                const auto destination = shortcut_row.destinations[destination_index];
                 if (destination == current.node ||
                     !CheckParentCellRestriction(partition, current_level, destination, restriction))
                 {
                     continue;
                 }
 
-                const auto shortcut_duration = facade.GetTemporalShortcutDuration(
-                    current_level, cell_id, current.node, destination, week_bucket);
+                const auto shortcut_min_duration = shortcut_row.min_durations[destination_index];
+                const auto function_id = shortcut_row.function_ids[destination_index];
+                if (shortcut_min_duration == INVALID_EDGE_DURATION ||
+                    function_id == customizer::INVALID_TEMPORAL_FUNCTION_ID)
+                {
+                    continue;
+                }
+
+                const auto shortcut_duration =
+                    facade.GetTemporalFunctionDuration(function_id, week_bucket);
                 const auto candidate =
                     temporal::detail::SafeDurationAdd(current.cost, shortcut_duration);
 

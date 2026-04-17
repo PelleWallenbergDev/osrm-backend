@@ -364,11 +364,25 @@ inline auto make_cell_storage_view(const SharedDataIndex &index, const std::stri
 {
     auto source_boundary = make_vector_view<NodeID>(index, name + "/source_boundary");
     auto destination_boundary = make_vector_view<NodeID>(index, name + "/destination_boundary");
+    auto source_boundary_index =
+        make_vector_view<partitioner::CellStorageView::BoundaryIndex>(
+            index, name + "/source_boundary_index");
+    auto destination_boundary_index =
+        make_vector_view<partitioner::CellStorageView::BoundaryIndex>(
+            index, name + "/destination_boundary_index");
     auto cells = make_vector_view<partitioner::CellStorageView::CellData>(index, name + "/cells");
     auto level_offsets = make_vector_view<std::uint64_t>(index, name + "/level_to_cell_offset");
+    auto boundary_index_offsets =
+        make_vector_view<std::uint64_t>(index, name + "/level_to_boundary_index_offset");
 
     return partitioner::CellStorageView{
-        source_boundary, destination_boundary, cells, level_offsets};
+        source_boundary,
+        destination_boundary,
+        source_boundary_index,
+        destination_boundary_index,
+        cells,
+        level_offsets,
+        boundary_index_offsets};
 }
 
 inline auto make_filtered_cell_metric_view(const SharedDataIndex &index,

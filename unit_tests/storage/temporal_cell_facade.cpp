@@ -224,6 +224,14 @@ BOOST_AUTO_TEST_CASE(mld_facade_reads_temporal_shortcuts_from_dct_sidecar)
 
     BOOST_CHECK(facade.HasTemporalShortcut(1, 0, 0, 1));
     BOOST_CHECK(!facade.HasTemporalShortcut(1, 0, 1, 0));
+    const auto shortcut_row = facade.GetTemporalShortcutRow(1, 0, 0);
+    BOOST_REQUIRE_EQUAL(shortcut_row.size, 1U);
+    BOOST_REQUIRE(shortcut_row.destinations != nullptr);
+    BOOST_REQUIRE(shortcut_row.function_ids != nullptr);
+    BOOST_REQUIRE(shortcut_row.min_durations != nullptr);
+    BOOST_CHECK_EQUAL(shortcut_row.destinations[0], 1U);
+    BOOST_CHECK_EQUAL(shortcut_row.function_ids[0], 0U);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(shortcut_row.min_durations[0]), 10);
     BOOST_CHECK_EQUAL(from_alias<std::int32_t>(facade.GetTemporalShortcutMinDuration(1, 0, 0, 1)),
                       10);
     BOOST_CHECK_SMALL(static_cast<double>(
@@ -236,6 +244,12 @@ BOOST_AUTO_TEST_CASE(mld_facade_reads_temporal_shortcuts_from_dct_sidecar)
                                        facade.GetTemporalShortcutDuration(1, 0, 0, 1, 2)) -
                                    14)),
                       1.1);
+    BOOST_CHECK_SMALL(static_cast<double>(std::abs(from_alias<std::int32_t>(
+                                                      facade.GetTemporalFunctionDuration(
+                                                          shortcut_row.function_ids[0], 2)) -
+                                                  14)),
+                      1.1);
+    BOOST_CHECK(facade.GetTemporalShortcutRow(1, 0, 1).empty());
     BOOST_CHECK_EQUAL(from_alias<std::int32_t>(facade.GetTemporalShortcutDuration(1, 0, 1, 0, 0)),
                       from_alias<std::int32_t>(INVALID_EDGE_DURATION));
 }
@@ -246,12 +260,15 @@ BOOST_AUTO_TEST_CASE(mld_facade_handles_missing_temporal_shortcut_sidecar)
     engine::datafacade::ContiguousInternalMemoryAlgorithmDataFacade<engine::datafacade::MLD> facade(
         allocator, "duration", 0);
 
+    BOOST_CHECK(facade.GetTemporalShortcutRow(1, 0, 0).empty());
     BOOST_CHECK(!facade.HasTemporalShortcut(1, 0, 0, 1));
     BOOST_CHECK_EQUAL(from_alias<std::int32_t>(facade.GetTemporalShortcutDuration(1, 0, 0, 1, 0)),
                       from_alias<std::int32_t>(INVALID_EDGE_DURATION));
     BOOST_CHECK_EQUAL(
         from_alias<std::int32_t>(facade.GetTemporalShortcutMinDuration(1, 0, 0, 1)),
         from_alias<std::int32_t>(INVALID_EDGE_DURATION));
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(facade.GetTemporalFunctionDuration(0, 0)),
+                      from_alias<std::int32_t>(INVALID_EDGE_DURATION));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

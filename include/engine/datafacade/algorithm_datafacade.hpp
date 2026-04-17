@@ -64,6 +64,18 @@ template <> class AlgorithmDataFacade<MLD>
   public:
     using EdgeData = customizer::EdgeBasedGraphEdgeData;
     using EdgeRange = util::range<EdgeID>;
+    struct TemporalShortcutRowView
+    {
+        const NodeID *destinations = nullptr;
+        const customizer::TemporalFunctionID *function_ids = nullptr;
+        const EdgeDuration *min_durations = nullptr;
+        std::size_t size = 0;
+
+        bool empty() const
+        {
+            return size == 0 || destinations == nullptr || function_ids == nullptr;
+        }
+    };
 
     virtual ~AlgorithmDataFacade() = default;
 
@@ -114,6 +126,14 @@ template <> class AlgorithmDataFacade<MLD>
                                                         const CellID cell_id,
                                                         const NodeID from,
                                                         const NodeID to) const = 0;
+
+    virtual TemporalShortcutRowView GetTemporalShortcutRow(const LevelID level,
+                                                           const CellID cell_id,
+                                                           const NodeID from) const = 0;
+
+    virtual EdgeDuration
+    GetTemporalFunctionDuration(const customizer::TemporalFunctionID function_id,
+                                const std::uint32_t week_bucket) const = 0;
 
     virtual EdgeRange GetBorderEdgeRange(const LevelID level,
                                          const NodeID edge_based_node_id) const = 0;

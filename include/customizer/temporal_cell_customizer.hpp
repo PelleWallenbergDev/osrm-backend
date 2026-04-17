@@ -52,6 +52,65 @@ class TemporalCellCustomizer
         std::vector<TemporalFunctionCoeffValue> coeffs;
     };
 
+    struct ComputeDiagnostics
+    {
+        std::uint64_t bucket_iterations = 0;
+        std::uint64_t heap_pops = 0;
+        std::uint64_t destination_hits = 0;
+        std::uint64_t skipped_source_rows = 0;
+        std::uint64_t shortcut_row_lookups = 0;
+        std::uint64_t shortcut_candidates = 0;
+        std::uint64_t shortcut_duration_decodes = 0;
+        std::uint64_t shortcut_queue_updates = 0;
+        std::uint64_t base_edge_candidates = 0;
+        std::uint64_t base_edge_duration_evaluations = 0;
+        std::uint64_t base_edge_queue_updates = 0;
+        std::uint64_t prepared_destination_profiles = 0;
+        std::uint64_t invalid_destination_profiles = 0;
+
+        ComputeDiagnostics &operator+=(const ComputeDiagnostics &rhs)
+        {
+            bucket_iterations += rhs.bucket_iterations;
+            heap_pops += rhs.heap_pops;
+            destination_hits += rhs.destination_hits;
+            skipped_source_rows += rhs.skipped_source_rows;
+            shortcut_row_lookups += rhs.shortcut_row_lookups;
+            shortcut_candidates += rhs.shortcut_candidates;
+            shortcut_duration_decodes += rhs.shortcut_duration_decodes;
+            shortcut_queue_updates += rhs.shortcut_queue_updates;
+            base_edge_candidates += rhs.base_edge_candidates;
+            base_edge_duration_evaluations += rhs.base_edge_duration_evaluations;
+            base_edge_queue_updates += rhs.base_edge_queue_updates;
+            prepared_destination_profiles += rhs.prepared_destination_profiles;
+            invalid_destination_profiles += rhs.invalid_destination_profiles;
+            return *this;
+        }
+    };
+
+    struct CommitDiagnostics
+    {
+        std::uint64_t invalid_metric_entries = 0;
+        std::uint64_t appended_functions = 0;
+        std::uint64_t reused_functions = 0;
+        std::uint64_t appended_payload_units = 0;
+
+        CommitDiagnostics &operator+=(const CommitDiagnostics &rhs)
+        {
+            invalid_metric_entries += rhs.invalid_metric_entries;
+            appended_functions += rhs.appended_functions;
+            reused_functions += rhs.reused_functions;
+            appended_payload_units += rhs.appended_payload_units;
+            return *this;
+        }
+    };
+
+    struct AppendPreparedFunctionResult
+    {
+        TemporalFunctionID function_id = INVALID_TEMPORAL_FUNCTION_ID;
+        bool reused_existing = false;
+        std::uint64_t appended_payload_units = 0;
+    };
+
     struct ComputedMetricEntry
     {
         std::size_t metric_index = 0;
@@ -61,6 +120,7 @@ class TemporalCellCustomizer
     struct ComputedCellResult
     {
         std::uint64_t processed_source_rows = 0;
+        ComputeDiagnostics diagnostics;
         std::vector<ComputedMetricEntry> entries;
     };
 
@@ -208,9 +268,10 @@ class TemporalCellCustomizer
         return prepared;
     }
 
-    TemporalFunctionID AppendPreparedFunction(TemporalFunctionStorage &storage,
-                                              DeduplicatedFunctionIndex &deduplicated_functions,
-                                              PreparedFunctionData prepared) const
+    AppendPreparedFunctionResult
+    AppendPreparedFunction(TemporalFunctionStorage &storage,
+                           DeduplicatedFunctionIndex &deduplicated_functions,
+                           PreparedFunctionData prepared) const
     {
         auto key = MakeFunctionKey(storage.meta.encoding_version,
                                    prepared.minimum_duration,
@@ -221,7 +282,7 @@ class TemporalCellCustomizer
         const auto existing = deduplicated_functions.find(key);
         if (existing != deduplicated_functions.end())
         {
-            return existing->second;
+            return {existing->second, true, 0};
         }
 
         const auto function_id = static_cast<TemporalFunctionID>(storage.profile_offsets.size());
@@ -229,6 +290,7 @@ class TemporalCellCustomizer
         storage.min_durations.push_back(std::get<1>(key));
         storage.freeflow_durations.push_back(std::get<2>(key));
         storage.profile_flags.push_back(std::get<3>(key));
+        std::uint64_t appended_payload_units = 0;
 
         if (storage.meta.encoding_version == TEMPORAL_FUNCTION_ENCODING_VERSION_DCT)
         {
@@ -236,6 +298,7 @@ class TemporalCellCustomizer
             storage.profile_offsets.push_back(storage.coeffs.size());
             storage.profile_sizes.push_back(static_cast<std::uint32_t>(coeffs.size()));
             storage.coeffs.insert(storage.coeffs.end(), coeffs.begin(), coeffs.end());
+            appended_payload_units = coeffs.size();
         }
         else
         {
@@ -243,10 +306,11 @@ class TemporalCellCustomizer
             storage.profile_offsets.push_back(storage.values.size());
             storage.profile_sizes.push_back(static_cast<std::uint32_t>(values.size()));
             storage.values.insert(storage.values.end(), values.begin(), values.end());
+            appended_payload_units = values.size();
         }
 
         deduplicated_functions.emplace(std::move(key), function_id);
-        return function_id;
+        return {function_id, false, appended_payload_units};
     }
 
     TemporalFunctionID AppendFunction(TemporalFunctionStorage &storage,
@@ -254,11 +318,12 @@ class TemporalCellCustomizer
                                       const std::vector<TemporalFunctionBucketValue> &profile) const
     {
         return AppendPreparedFunction(
-            storage,
-            deduplicated_functions,
-            PrepareFunction(storage.meta,
-                            std::vector<TemporalFunctionBucketValue>(profile.begin(),
-                                                                     profile.end())));
+                   storage,
+                   deduplicated_functions,
+                   PrepareFunction(storage.meta,
+                                   std::vector<TemporalFunctionBucketValue>(profile.begin(),
+                                                                            profile.end())))
+            .function_id;
     }
 
     template <typename GraphT, typename EvaluatorT>
@@ -268,6 +333,7 @@ class TemporalCellCustomizer
                    const EvaluatorT &evaluator,
                    const TemporalCellMetric &metric,
                    const TemporalFunctionStorage &storage,
+                   ComputeDiagnostics &diagnostics,
                    util::QueryHeap<NodeID,
                                    NodeID,
                                    EdgeDuration,
@@ -282,6 +348,7 @@ class TemporalCellCustomizer
 
         if (!first_level && !heap.GetData(node).from_clique)
         {
+            ++diagnostics.shortcut_row_lookups;
             const auto subcell_id = partition.GetCell(level - 1, node);
             const auto subcell = metric.GetCell(cells, level - 1, subcell_id);
             auto subcell_destination = subcell.GetDestinationNodes().begin();
@@ -291,6 +358,7 @@ class TemporalCellCustomizer
 
             for (const auto subcell_function_id : subcell.GetOutFunctionID(node))
             {
+                ++diagnostics.shortcut_candidates;
                 const auto to = *subcell_destination;
                 const auto lower_bound = *subcell_min_duration;
 
@@ -298,6 +366,7 @@ class TemporalCellCustomizer
                     subcell_function_id != INVALID_TEMPORAL_FUNCTION_ID &&
                     lower_bound != INVALID_EDGE_DURATION)
                 {
+                    ++diagnostics.shortcut_duration_decodes;
                     const auto shortcut_duration =
                         storage.GetDuration(subcell_function_id, evaluation_bucket);
                     const auto to_duration = SafeAddDuration(current_duration, shortcut_duration);
@@ -306,11 +375,13 @@ class TemporalCellCustomizer
                         if (!heap.WasInserted(to))
                         {
                             heap.Insert(to, to_duration, {true});
+                            ++diagnostics.shortcut_queue_updates;
                         }
                         else if (to_duration < heap.GetKey(to))
                         {
                             heap.DecreaseKey(to, to_duration);
                             heap.GetData(to) = {true};
+                            ++diagnostics.shortcut_queue_updates;
                         }
                     }
                 }
@@ -324,6 +395,7 @@ class TemporalCellCustomizer
                                                                         current_duration);
         for (const auto edge : graph.GetInternalEdgeRange(level, node))
         {
+            ++diagnostics.base_edge_candidates;
             const auto to = graph.GetTarget(edge);
             if (!allowed_nodes[to])
             {
@@ -338,6 +410,7 @@ class TemporalCellCustomizer
                 continue;
             }
 
+            ++diagnostics.base_edge_duration_evaluations;
             const auto arc_duration =
                 evaluator.GetBaseEdgeDuration(graph, node, edge, evaluation_bucket);
             const auto to_duration = SafeAddDuration(current_duration, arc_duration);
@@ -349,11 +422,13 @@ class TemporalCellCustomizer
             if (!heap.WasInserted(to))
             {
                 heap.Insert(to, to_duration, {false});
+                ++diagnostics.base_edge_queue_updates;
             }
             else if (to_duration < heap.GetKey(to))
             {
                 heap.DecreaseKey(to, to_duration);
                 heap.GetData(to) = {false};
+                ++diagnostics.base_edge_queue_updates;
             }
         }
     }
@@ -461,6 +536,7 @@ class TemporalCellCustomizer
 
             if (!allowed_nodes[source])
             {
+                ++result.diagnostics.skipped_source_rows;
                 for (std::size_t destination_index = 0; destination_index < destination_nodes.size();
                      ++destination_index)
                 {
@@ -478,18 +554,21 @@ class TemporalCellCustomizer
             for (std::uint32_t departure_bucket = 0; departure_bucket < bucket_count;
                  ++departure_bucket)
             {
+                ++result.diagnostics.bucket_iterations;
                 heap.Clear();
                 heap.Insert(source, EdgeDuration{0}, {false});
                 auto remaining = destination_lookup;
 
                 while (!heap.Empty() && !remaining.empty())
                 {
+                    ++result.diagnostics.heap_pops;
                     const auto node = heap.DeleteMin();
                     const auto current_duration = heap.GetKey(node);
 
                     const auto found = remaining.find(node);
                     if (found != remaining.end())
                     {
+                        ++result.diagnostics.destination_hits;
                         dense_functions[found->second][departure_bucket] =
                             from_alias<TemporalFunctionBucketValue>(current_duration);
                         remaining.erase(found);
@@ -501,6 +580,7 @@ class TemporalCellCustomizer
                               evaluator,
                               metric,
                               storage,
+                              result.diagnostics,
                               heap,
                               level,
                               node,
@@ -522,10 +602,12 @@ class TemporalCellCustomizer
                 const auto metric_index = row_offset + destination_index;
                 if (has_invalid_bucket)
                 {
+                    ++result.diagnostics.invalid_destination_profiles;
                     result.entries.push_back({metric_index, std::nullopt});
                     continue;
                 }
 
+                ++result.diagnostics.prepared_destination_profiles;
                 result.entries.push_back(
                     {metric_index, PrepareFunction(storage.meta, std::move(profile))});
             }
@@ -534,25 +616,40 @@ class TemporalCellCustomizer
         return result;
     }
 
-    void CommitCellResult(TemporalCellMetric &metric,
-                          TemporalFunctionStorage &storage,
-                          DeduplicatedFunctionIndex &deduplicated_functions,
-                          ComputedCellResult result) const
+    CommitDiagnostics CommitCellResult(TemporalCellMetric &metric,
+                                       TemporalFunctionStorage &storage,
+                                       DeduplicatedFunctionIndex &deduplicated_functions,
+                                       ComputedCellResult result) const
     {
+        CommitDiagnostics diagnostics;
         for (auto &entry : result.entries)
         {
             if (!entry.function)
             {
+                ++diagnostics.invalid_metric_entries;
                 metric.function_ids[entry.metric_index] = INVALID_TEMPORAL_FUNCTION_ID;
                 metric.min_durations[entry.metric_index] = INVALID_EDGE_DURATION;
                 continue;
             }
 
-            const auto function_id =
+            const auto append_result =
                 AppendPreparedFunction(storage, deduplicated_functions, std::move(*entry.function));
-            metric.function_ids[entry.metric_index] = function_id;
-            metric.min_durations[entry.metric_index] = storage.GetMinDuration(function_id);
+            if (append_result.reused_existing)
+            {
+                ++diagnostics.reused_functions;
+            }
+            else
+            {
+                ++diagnostics.appended_functions;
+                diagnostics.appended_payload_units += append_result.appended_payload_units;
+            }
+
+            metric.function_ids[entry.metric_index] = append_result.function_id;
+            metric.min_durations[entry.metric_index] =
+                storage.GetMinDuration(append_result.function_id);
         }
+
+        return diagnostics;
     }
 
     template <typename GraphT, typename EvaluatorT>
@@ -624,6 +721,10 @@ class TemporalCellCustomizer
             const auto level_start = std::chrono::steady_clock::now();
             const auto log_interval = std::max<std::size_t>(1, level_cell_count / 20);
             std::uint64_t processed_source_rows = 0;
+            std::uint64_t compute_time_ms_total = 0;
+            std::uint64_t commit_time_ms_total = 0;
+            ComputeDiagnostics level_compute_diagnostics;
+            CommitDiagnostics level_commit_diagnostics;
 
             util::Log() << "Temporal overlay customization: starting level " << level
                         << " with " << level_cell_count << " cell(s), bucket_count="
@@ -636,6 +737,7 @@ class TemporalCellCustomizer
                 const auto chunk_end = std::min<std::size_t>(
                     level_cell_count, chunk_begin + PARALLEL_CELL_CHUNK_SIZE);
                 std::vector<ComputedCellResult> computed_cells(chunk_end - chunk_begin);
+                const auto chunk_compute_start = std::chrono::steady_clock::now();
 
                 tbb::parallel_for(
                     tbb::blocked_range<std::size_t>(chunk_begin, chunk_end),
@@ -653,19 +755,35 @@ class TemporalCellCustomizer
                                             metric,
                                             storage,
                                             static_cast<LevelID>(level),
-                                            static_cast<CellID>(id));
+                                             static_cast<CellID>(id));
                         }
                     });
+                const auto chunk_compute_ms = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - chunk_compute_start)
+                        .count());
 
                 std::uint64_t chunk_processed_source_rows = 0;
+                ComputeDiagnostics chunk_compute_diagnostics;
+                CommitDiagnostics chunk_commit_diagnostics;
+                const auto chunk_commit_start = std::chrono::steady_clock::now();
                 for (auto &computed : computed_cells)
                 {
                     chunk_processed_source_rows += computed.processed_source_rows;
-                    CommitCellResult(
-                        metric, storage, deduplicated_functions, std::move(computed));
+                    chunk_compute_diagnostics += computed.diagnostics;
+                    chunk_commit_diagnostics +=
+                        CommitCellResult(metric, storage, deduplicated_functions, std::move(computed));
                 }
+                const auto chunk_commit_ms = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - chunk_commit_start)
+                        .count());
 
                 processed_source_rows += chunk_processed_source_rows;
+                compute_time_ms_total += chunk_compute_ms;
+                commit_time_ms_total += chunk_commit_ms;
+                level_compute_diagnostics += chunk_compute_diagnostics;
+                level_commit_diagnostics += chunk_commit_diagnostics;
                 const auto completed_cells = chunk_end;
                 const auto crossed_interval =
                     chunk_begin / log_interval != (completed_cells - 1) / log_interval;
@@ -678,9 +796,69 @@ class TemporalCellCustomizer
                                 << " progress " << completed_cells << "/" << level_cell_count
                                 << " cell(s), processed_source_rows=" << processed_source_rows
                                 << ", function_count=" << storage.profile_offsets.size()
-                                << ", elapsed=" << elapsed << "s";
+                                << ", elapsed=" << elapsed << "s"
+                                << ", compute_ms=" << compute_time_ms_total
+                                << ", commit_ms=" << commit_time_ms_total
+                                << ", heap_pops=" << level_compute_diagnostics.heap_pops
+                                << ", shortcut_decodes="
+                                << level_compute_diagnostics.shortcut_duration_decodes
+                                << ", base_edge_evals="
+                                << level_compute_diagnostics.base_edge_duration_evaluations
+                                << ", new_functions=" << level_commit_diagnostics.appended_functions
+                                << ", reused_functions="
+                                << level_commit_diagnostics.reused_functions;
                 }
             }
+
+            const auto level_elapsed_ms = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - level_start)
+                    .count());
+            const auto compute_ms_per_source_row =
+                processed_source_rows == 0
+                    ? 0.0
+                    : static_cast<double>(compute_time_ms_total) /
+                          static_cast<double>(processed_source_rows);
+            const auto commit_ms_per_source_row =
+                processed_source_rows == 0
+                    ? 0.0
+                    : static_cast<double>(commit_time_ms_total) /
+                          static_cast<double>(processed_source_rows);
+
+            util::Log() << "Temporal overlay customization: level " << level
+                        << " diagnostics elapsed_ms=" << level_elapsed_ms
+                        << ", compute_ms=" << compute_time_ms_total
+                        << ", commit_ms=" << commit_time_ms_total
+                        << ", compute_ms_per_source_row=" << compute_ms_per_source_row
+                        << ", commit_ms_per_source_row=" << commit_ms_per_source_row
+                        << ", bucket_iterations=" << level_compute_diagnostics.bucket_iterations
+                        << ", heap_pops=" << level_compute_diagnostics.heap_pops
+                        << ", destination_hits=" << level_compute_diagnostics.destination_hits
+                        << ", skipped_source_rows=" << level_compute_diagnostics.skipped_source_rows
+                        << ", shortcut_row_lookups="
+                        << level_compute_diagnostics.shortcut_row_lookups
+                        << ", shortcut_candidates="
+                        << level_compute_diagnostics.shortcut_candidates
+                        << ", shortcut_decodes="
+                        << level_compute_diagnostics.shortcut_duration_decodes
+                        << ", shortcut_queue_updates="
+                        << level_compute_diagnostics.shortcut_queue_updates
+                        << ", base_edge_candidates="
+                        << level_compute_diagnostics.base_edge_candidates
+                        << ", base_edge_evals="
+                        << level_compute_diagnostics.base_edge_duration_evaluations
+                        << ", base_edge_queue_updates="
+                        << level_compute_diagnostics.base_edge_queue_updates
+                        << ", prepared_profiles="
+                        << level_compute_diagnostics.prepared_destination_profiles
+                        << ", invalid_profiles="
+                        << level_compute_diagnostics.invalid_destination_profiles
+                        << ", invalid_metric_entries="
+                        << level_commit_diagnostics.invalid_metric_entries
+                        << ", new_functions=" << level_commit_diagnostics.appended_functions
+                        << ", reused_functions=" << level_commit_diagnostics.reused_functions
+                        << ", appended_payload_units="
+                        << level_commit_diagnostics.appended_payload_units;
         }
     }
 

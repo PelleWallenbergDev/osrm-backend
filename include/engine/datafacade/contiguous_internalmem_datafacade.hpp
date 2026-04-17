@@ -731,6 +731,7 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
 {
     using TemporalFunctionStorageView = customizer::TemporalFunctionStorageView;
     using TemporalCellMetricView = customizer::TemporalCellMetricView;
+    using TemporalShortcutRowView = typename AlgorithmDataFacade<MLD>::TemporalShortcutRowView;
 
     // MLD data
     partitioner::MultiLevelPartitionView mld_partition;
@@ -749,27 +750,13 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
                                                                  const NodeID from,
                                                                  const NodeID to) const
     {
-        if (!mld_temporal_cell_metric || !mld_temporal_cell_storage)
+        if (!mld_temporal_cell_metric)
         {
             return customizer::INVALID_TEMPORAL_FUNCTION_ID;
         }
 
         const auto cell = mld_temporal_cell_metric->GetCell(mld_cell_storage, level, cell_id);
-        auto destination_iterator = cell.GetDestinationNodes().begin();
-        auto function_iterator = cell.GetOutFunctionID(from).begin();
-        const auto destination_end = cell.GetDestinationNodes().end();
-        const auto function_end = cell.GetOutFunctionID(from).end();
-
-        for (; destination_iterator != destination_end && function_iterator != function_end;
-             ++destination_iterator, ++function_iterator)
-        {
-            if (*destination_iterator == to)
-            {
-                return *function_iterator;
-            }
-        }
-
-        return customizer::INVALID_TEMPORAL_FUNCTION_ID;
+        return cell.GetFunctionID(from, to);
     }
 
     void InitializeInternalPointers(const storage::SharedDataIndex &index,
@@ -839,7 +826,7 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
             return INVALID_EDGE_DURATION;
         }
 
-        return mld_temporal_cell_storage->GetDuration(function_id, week_bucket);
+        return GetTemporalFunctionDuration(function_id, week_bucket);
     }
 
     EdgeDuration GetTemporalShortcutMinDuration(const LevelID level,
@@ -847,14 +834,50 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
                                                 const NodeID from,
                                                 const NodeID to) const override final
     {
-        const auto function_id = FindTemporalShortcutFunctionID(level, cell_id, from, to);
+        if (!mld_temporal_cell_metric)
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        const auto cell = mld_temporal_cell_metric->GetCell(mld_cell_storage, level, cell_id);
+        return cell.GetMinDuration(from, to);
+    }
+
+    TemporalShortcutRowView GetTemporalShortcutRow(const LevelID level,
+                                                   const CellID cell_id,
+                                                   const NodeID from) const override final
+    {
+        if (!mld_temporal_cell_metric || !mld_temporal_cell_storage)
+        {
+            return {};
+        }
+
+        const auto cell = mld_temporal_cell_metric->GetCell(mld_cell_storage, level, cell_id);
+        const auto destinations = cell.GetDestinationNodes();
+        const auto function_row = cell.GetOutFunctionID(from);
+        const auto min_duration_row = cell.GetOutMinDuration(from);
+        const auto size =
+            static_cast<std::size_t>(std::distance(function_row.begin(), function_row.end()));
+
+        if (size == 0)
+        {
+            return {};
+        }
+
+        return {destinations.begin(), function_row.begin(), min_duration_row.begin(), size};
+    }
+
+    EdgeDuration
+    GetTemporalFunctionDuration(const customizer::TemporalFunctionID function_id,
+                                const std::uint32_t week_bucket) const override final
+    {
         if (function_id == customizer::INVALID_TEMPORAL_FUNCTION_ID || !mld_temporal_cell_storage ||
             !mld_temporal_cell_storage->HasProfile(function_id))
         {
             return INVALID_EDGE_DURATION;
         }
 
-        return mld_temporal_cell_storage->GetMinDuration(function_id);
+        return mld_temporal_cell_storage->GetDuration(function_id, week_bucket);
     }
 
     // search graph access

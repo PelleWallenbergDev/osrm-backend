@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
+#include <optional>
 #include <ranges>
 #include <utility>
 
@@ -33,6 +34,8 @@ template <storage::Ownership Ownership> struct TemporalCellMetricImpl
         using FunctionIdPtrT = FunctionIdValueT *;
         using DurationPtrT = DurationValueT *;
         using FunctionIdRowIterator = FunctionIdPtrT;
+        using BoundaryIndex = partitioner::CellStorageView::BoundaryIndex;
+        using BoundaryOffset = partitioner::CellStorageView::BoundaryOffset;
 
         template <typename ValuePtrT>
         class ColumnIterator
@@ -74,16 +77,54 @@ template <storage::Ownership Ownership> struct TemporalCellMetricImpl
             std::size_t stride;
         };
 
+        BoundaryIndex GetSourceBoundaryPosition(const NodeID node) const
+        {
+            if (source_boundary_index == nullptr ||
+                static_cast<BoundaryOffset>(node) >= boundary_index_size)
+            {
+                return partitioner::CellStorageView::INVALID_BOUNDARY_INDEX;
+            }
+
+            const auto boundary_index = source_boundary_index[node];
+            if (boundary_index == partitioner::CellStorageView::INVALID_BOUNDARY_INDEX ||
+                boundary_index < source_boundary_offset ||
+                boundary_index >= source_boundary_offset + num_source_nodes)
+            {
+                return partitioner::CellStorageView::INVALID_BOUNDARY_INDEX;
+            }
+
+            return boundary_index;
+        }
+
+        BoundaryIndex GetDestinationBoundaryPosition(const NodeID node) const
+        {
+            if (destination_boundary_index == nullptr ||
+                static_cast<BoundaryOffset>(node) >= boundary_index_size)
+            {
+                return partitioner::CellStorageView::INVALID_BOUNDARY_INDEX;
+            }
+
+            const auto boundary_index = destination_boundary_index[node];
+            if (boundary_index == partitioner::CellStorageView::INVALID_BOUNDARY_INDEX ||
+                boundary_index < destination_boundary_offset ||
+                boundary_index >= destination_boundary_offset + num_destination_nodes)
+            {
+                return partitioner::CellStorageView::INVALID_BOUNDARY_INDEX;
+            }
+
+            return boundary_index;
+        }
+
         template <typename ValuePtrT>
         auto GetOutRange(const ValuePtrT ptr, const NodeID node) const
         {
-            auto iter = std::find(source_boundary, source_boundary + num_source_nodes, node);
-            if (iter == source_boundary + num_source_nodes)
+            const auto boundary_index = GetSourceBoundaryPosition(node);
+            if (boundary_index == partitioner::CellStorageView::INVALID_BOUNDARY_INDEX)
             {
                 return std::ranges::subrange(ptr, ptr);
             }
 
-            const auto row = std::distance(source_boundary, iter);
+            const auto row = boundary_index - source_boundary_offset;
             auto begin = ptr + num_destination_nodes * row;
             auto end = begin + num_destination_nodes;
             return std::ranges::subrange(begin, end);
@@ -92,19 +133,33 @@ template <storage::Ownership Ownership> struct TemporalCellMetricImpl
         template <typename ValuePtrT>
         auto GetInRange(const ValuePtrT ptr, const NodeID node) const
         {
-            auto iter =
-                std::find(destination_boundary, destination_boundary + num_destination_nodes, node);
-            if (iter == destination_boundary + num_destination_nodes)
+            const auto boundary_index = GetDestinationBoundaryPosition(node);
+            if (boundary_index == partitioner::CellStorageView::INVALID_BOUNDARY_INDEX)
             {
                 return std::ranges::subrange(ColumnIterator<ValuePtrT>{},
                                              ColumnIterator<ValuePtrT>{});
             }
 
-            const auto column = std::distance(destination_boundary, iter);
+            const auto column = boundary_index - destination_boundary_offset;
             auto begin = ColumnIterator<ValuePtrT>{ptr + column, num_destination_nodes};
             auto end = ColumnIterator<ValuePtrT>{
                 ptr + column + num_source_nodes * num_destination_nodes, num_destination_nodes};
             return std::ranges::subrange(begin, end);
+        }
+
+        std::optional<std::size_t> GetMatrixIndex(const NodeID from, const NodeID to) const
+        {
+            const auto source_position = GetSourceBoundaryPosition(from);
+            const auto destination_position = GetDestinationBoundaryPosition(to);
+            if (source_position == partitioner::CellStorageView::INVALID_BOUNDARY_INDEX ||
+                destination_position == partitioner::CellStorageView::INVALID_BOUNDARY_INDEX)
+            {
+                return std::nullopt;
+            }
+
+            const auto row = source_position - source_boundary_offset;
+            const auto column = destination_position - destination_boundary_offset;
+            return static_cast<std::size_t>(row) * num_destination_nodes + column;
         }
 
       public:
@@ -113,13 +168,21 @@ template <storage::Ownership Ownership> struct TemporalCellMetricImpl
                  FunctionIdPtrT all_function_ids,
                  DurationPtrT all_min_durations,
                  const NodeID *all_sources,
-                 const NodeID *all_destinations)
+                 const NodeID *all_destinations,
+                 const BoundaryIndex *all_source_boundary_index,
+                 const BoundaryIndex *all_destination_boundary_index,
+                 const BoundaryOffset boundary_index_size_)
             : num_source_nodes(data.num_source_nodes),
               num_destination_nodes(data.num_destination_nodes),
               function_ids(all_function_ids + data.value_offset),
               min_durations(all_min_durations + data.value_offset),
               source_boundary(all_sources + data.source_boundary_offset),
-              destination_boundary(all_destinations + data.destination_boundary_offset)
+              destination_boundary(all_destinations + data.destination_boundary_offset),
+              source_boundary_index(all_source_boundary_index),
+              destination_boundary_index(all_destination_boundary_index),
+              source_boundary_offset(data.source_boundary_offset),
+              destination_boundary_offset(data.destination_boundary_offset),
+              boundary_index_size(boundary_index_size_)
         {
         }
 
@@ -130,6 +193,18 @@ template <storage::Ownership Ownership> struct TemporalCellMetricImpl
         auto GetOutMinDuration(const NodeID node) const { return GetOutRange(min_durations, node); }
 
         auto GetInMinDuration(const NodeID node) const { return GetInRange(min_durations, node); }
+
+        TemporalFunctionID GetFunctionID(const NodeID from, const NodeID to) const
+        {
+            const auto matrix_index = GetMatrixIndex(from, to);
+            return matrix_index ? function_ids[*matrix_index] : INVALID_TEMPORAL_FUNCTION_ID;
+        }
+
+        EdgeDuration GetMinDuration(const NodeID from, const NodeID to) const
+        {
+            const auto matrix_index = GetMatrixIndex(from, to);
+            return matrix_index ? min_durations[*matrix_index] : INVALID_EDGE_DURATION;
+        }
 
         auto GetSourceNodes() const
         {
@@ -149,6 +224,11 @@ template <storage::Ownership Ownership> struct TemporalCellMetricImpl
         DurationPtrT min_durations;
         const NodeID *source_boundary;
         const NodeID *destination_boundary;
+        const BoundaryIndex *source_boundary_index;
+        const BoundaryIndex *destination_boundary_index;
+        BoundaryOffset source_boundary_offset;
+        BoundaryOffset destination_boundary_offset;
+        BoundaryOffset boundary_index_size;
     };
 
     using Cell = CellImpl<TemporalFunctionID, EdgeDuration>;
@@ -163,7 +243,10 @@ template <storage::Ownership Ownership> struct TemporalCellMetricImpl
                          function_ids.data(),
                          min_durations.data(),
                          cells.GetSourceBoundaryData(),
-                         cells.GetDestinationBoundaryData()};
+                         cells.GetDestinationBoundaryData(),
+                         cells.GetSourceBoundaryIndexData(level),
+                         cells.GetDestinationBoundaryIndexData(level),
+                         cells.GetBoundaryIndexCount(level)};
     }
 };
 } // namespace detail
