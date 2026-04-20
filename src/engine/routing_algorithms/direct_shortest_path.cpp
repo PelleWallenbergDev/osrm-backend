@@ -185,6 +185,10 @@ InternalRouteResult temporalOverlayDirectShortestPathSearch(
         return {};
     }
 
+    const auto shared_query_level_policy =
+        mld::temporal::overlay::detail::MakeSharedEndpointQueryLevelPolicy(
+            facade, source_endpoints, target_endpoints);
+
     mld::temporal::overlay::TemporalOverlayPath best_path;
     const mld::temporal::DirectedPhantomEndpoint *best_source = nullptr;
     const mld::temporal::DirectedPhantomEndpoint *best_target = nullptr;
@@ -193,8 +197,8 @@ InternalRouteResult temporalOverlayDirectShortestPathSearch(
     {
         for (const auto &target : target_endpoints)
         {
-            const auto candidate =
-                mld::temporal::overlay::Search(facade, source, target, departure_timestamp);
+            const auto candidate = mld::temporal::overlay::Search(
+                facade, source, target, departure_timestamp, shared_query_level_policy);
             if (!candidate.is_valid() ||
                 (best_path.is_valid() && candidate.total_duration >= best_path.total_duration))
             {

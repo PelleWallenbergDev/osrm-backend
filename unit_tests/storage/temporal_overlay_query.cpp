@@ -904,6 +904,86 @@ struct MissingShortcutFallbackFacade : StaticTemporalDivergenceFacade
 
 BOOST_AUTO_TEST_SUITE(temporal_overlay_query)
 
+BOOST_AUTO_TEST_CASE(shared_endpoint_query_level_policy_uses_minimum_level_across_endpoint_pairs)
+{
+    MockFacade facade;
+
+    const auto source_zero_phantom = MakeZeroTraversalPhantom(0);
+    const auto source_one_phantom = MakeZeroTraversalPhantom(1);
+    const auto target_two_phantom = MakeZeroTraversalPhantom(2);
+    const auto target_three_phantom = MakeZeroTraversalPhantom(3);
+
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        source_endpoints{{&source_zero_phantom, 0, false}, {&source_one_phantom, 1, false}};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        target_endpoints{{&target_two_phantom, 2, false}, {&target_three_phantom, 3, false}};
+
+    const auto pair_level =
+        engine::routing_algorithms::mld::temporal::overlay::detail::GetNodeQueryLevel(
+            facade.GetMultiLevelPartition(),
+            NodeID{0},
+            source_endpoints.front(),
+            target_endpoints.back(),
+            {});
+    const auto shared_query_level_policy =
+        engine::routing_algorithms::mld::temporal::overlay::detail::MakeSharedEndpointQueryLevelPolicy(
+            facade, source_endpoints, target_endpoints);
+
+    BOOST_CHECK_EQUAL(pair_level, LevelID{1});
+    BOOST_CHECK_EQUAL(
+        shared_query_level_policy.GetNodeQueryLevel(NodeID{0}, {}), LevelID{0});
+    BOOST_CHECK_EQUAL(
+        shared_query_level_policy.GetNodeQueryLevel(NodeID{3}, {}), LevelID{0});
+}
+
+BOOST_AUTO_TEST_CASE(shared_corridor_search_preserves_unpacked_result_when_broadened)
+{
+    MockFacade facade;
+
+    const auto source_zero_phantom = MakeZeroTraversalPhantom(0);
+    const auto source_one_phantom = MakeZeroTraversalPhantom(1);
+    const auto target_two_phantom = MakeZeroTraversalPhantom(2);
+    const auto target_three_phantom = MakeZeroTraversalPhantom(3);
+
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_zero_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_three_phantom, 3, false};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        source_endpoints{source, {&source_one_phantom, 1, false}};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        target_endpoints{{&target_two_phantom, 2, false}, target};
+    const auto shared_query_level_policy =
+        engine::routing_algorithms::mld::temporal::overlay::detail::MakeSharedEndpointQueryLevelPolicy(
+            facade, source_endpoints, target_endpoints);
+
+    const auto pair_specific_path = engine::routing_algorithms::mld::temporal::overlay::Search(
+        facade, source, target, mondayMidnightUtc());
+    const auto shared_corridor_path = engine::routing_algorithms::mld::temporal::overlay::Search(
+        facade, source, target, mondayMidnightUtc(), shared_query_level_policy);
+    const auto pair_specific_unpacked = engine::routing_algorithms::mld::temporal::overlay::UnpackPath(
+        facade, source, target, mondayMidnightUtc(), pair_specific_path);
+    const auto shared_corridor_unpacked =
+        engine::routing_algorithms::mld::temporal::overlay::UnpackPath(
+            facade, source, target, mondayMidnightUtc(), shared_corridor_path);
+
+    BOOST_REQUIRE(pair_specific_path.is_valid());
+    BOOST_REQUIRE(shared_corridor_path.is_valid());
+    BOOST_REQUIRE(pair_specific_unpacked.is_valid());
+    BOOST_REQUIRE(shared_corridor_unpacked.is_valid());
+
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(pair_specific_unpacked.total_duration), 15);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(shared_corridor_unpacked.total_duration), 15);
+    BOOST_CHECK_EQUAL_COLLECTIONS(shared_corridor_unpacked.nodes.begin(),
+                                  shared_corridor_unpacked.nodes.end(),
+                                  pair_specific_unpacked.nodes.begin(),
+                                  pair_specific_unpacked.nodes.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(shared_corridor_unpacked.edges.begin(),
+                                  shared_corridor_unpacked.edges.end(),
+                                  pair_specific_unpacked.edges.begin(),
+                                  pair_specific_unpacked.edges.end());
+}
+
 BOOST_AUTO_TEST_CASE(restricted_level_one_search_uses_temporal_shortcut)
 {
     MockFacade facade;

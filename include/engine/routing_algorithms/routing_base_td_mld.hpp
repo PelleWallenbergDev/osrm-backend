@@ -14,6 +14,7 @@
 #include <ctime>
 #include <optional>
 #include <queue>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -90,6 +91,121 @@ inline LevelID GetNodeQueryLevel(const MultiLevelPartition &partition,
     }
 
     return partition.GetQueryLevel(source.node, target.node, node);
+}
+
+template <typename MultiLevelPartition>
+inline LevelID GetNodeQueryLevel(const MultiLevelPartition &partition,
+                                 const NodeID node,
+                                 const std::vector<DirectedPhantomEndpoint> &sources,
+                                 const DirectedPhantomEndpoint &target,
+                                 const SearchRestriction &restriction)
+{
+    if (restriction.restricted)
+    {
+        return restriction.level;
+    }
+
+    auto level = INVALID_LEVEL_ID;
+    for (const auto &source : sources)
+    {
+        level = std::min(level, partition.GetQueryLevel(source.node, target.node, node));
+    }
+
+    return level;
+}
+
+template <typename MultiLevelPartition>
+inline LevelID GetNodeQueryLevel(const MultiLevelPartition &partition,
+                                 const NodeID node,
+                                 const std::vector<DirectedPhantomEndpoint> &sources,
+                                 const std::vector<DirectedPhantomEndpoint> &targets,
+                                 const SearchRestriction &restriction)
+{
+    if (restriction.restricted)
+    {
+        return restriction.level;
+    }
+
+    auto level = INVALID_LEVEL_ID;
+    for (const auto &source : sources)
+    {
+        for (const auto &target : targets)
+        {
+            level = std::min(level, partition.GetQueryLevel(source.node, target.node, node));
+        }
+    }
+
+    return level;
+}
+
+template <typename MultiLevelPartition> struct PairQueryLevelPolicy
+{
+    const MultiLevelPartition &partition;
+    const DirectedPhantomEndpoint &source;
+    const DirectedPhantomEndpoint &target;
+
+    LevelID GetNodeQueryLevel(const NodeID node, const SearchRestriction &restriction) const
+    {
+        return overlay::detail::GetNodeQueryLevel(partition, node, source, target, restriction);
+    }
+};
+
+template <typename MultiLevelPartition> class SharedEndpointQueryLevelPolicy
+{
+  public:
+    SharedEndpointQueryLevelPolicy(const MultiLevelPartition &partition_,
+                                   const std::vector<DirectedPhantomEndpoint> &source_endpoints_,
+                                   const std::vector<DirectedPhantomEndpoint> &target_endpoints_,
+                                   const std::size_t number_of_nodes)
+        : partition(partition_), source_endpoints(source_endpoints_),
+          target_endpoints(target_endpoints_), cached_levels(number_of_nodes, INVALID_LEVEL_ID),
+          cache_valid(number_of_nodes, false)
+    {
+    }
+
+    LevelID GetNodeQueryLevel(const NodeID node, const SearchRestriction &restriction) const
+    {
+        if (restriction.restricted)
+        {
+            return restriction.level;
+        }
+
+        if (node >= cached_levels.size())
+        {
+            return INVALID_LEVEL_ID;
+        }
+
+        if (!cache_valid[node])
+        {
+            cached_levels[node] = overlay::detail::GetNodeQueryLevel(
+                partition, node, source_endpoints, target_endpoints, restriction);
+            cache_valid[node] = true;
+        }
+
+        return cached_levels[node];
+    }
+
+  private:
+    const MultiLevelPartition &partition;
+    const std::vector<DirectedPhantomEndpoint> &source_endpoints;
+    const std::vector<DirectedPhantomEndpoint> &target_endpoints;
+    mutable std::vector<LevelID> cached_levels;
+    mutable std::vector<bool> cache_valid;
+};
+
+template <typename FacadeT>
+auto MakeSharedEndpointQueryLevelPolicy(
+    const FacadeT &facade,
+    const std::vector<DirectedPhantomEndpoint> &source_endpoints,
+    const std::vector<DirectedPhantomEndpoint> &target_endpoints)
+{
+    using PartitionT = std::decay_t<decltype(facade.GetMultiLevelPartition())>;
+
+    return SharedEndpointQueryLevelPolicy<PartitionT>{
+        facade.GetMultiLevelPartition(),
+        source_endpoints,
+        target_endpoints,
+        facade.GetNumberOfNodes()};
 }
 
 template <typename MultiLevelPartition>
@@ -184,11 +300,44 @@ inline PackedPath BuildPackedPath(const std::vector<NodeID> &parents,
     return packed_path;
 }
 
+template <typename FacadeT, typename QueryLevelPolicyT>
+std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
+                                                    const DirectedPhantomEndpoint &target,
+                                                    const SearchRestriction &restriction,
+                                                    const QueryLevelPolicyT &query_level_policy);
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath SearchAtClock(const FacadeT &facade,
+                                  const DirectedPhantomEndpoint &source,
+                                  const DirectedPhantomEndpoint &target,
+                                  const engine::temporal::TemporalClock departure_clock,
+                                  const SearchRestriction &restriction,
+                                  const QueryLevelPolicyT &query_level_policy);
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath SearchImpl(const FacadeT &facade,
+                               const DirectedPhantomEndpoint &source,
+                               const DirectedPhantomEndpoint &target,
+                               const std::time_t departure_timestamp,
+                               const SearchRestriction &restriction,
+                               const QueryLevelPolicyT &query_level_policy);
+
 template <typename FacadeT>
 std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
                                                     const DirectedPhantomEndpoint &source,
                                                     const DirectedPhantomEndpoint &target,
                                                     const SearchRestriction &restriction)
+{
+    const PairQueryLevelPolicy pair_query_level_policy{
+        facade.GetMultiLevelPartition(), source, target};
+    return ComputeReverseLowerBounds(facade, target, restriction, pair_query_level_policy);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
+                                                    const DirectedPhantomEndpoint &target,
+                                                    const SearchRestriction &restriction,
+                                                    const QueryLevelPolicyT &query_level_policy)
 {
     std::vector<EdgeDuration> lower_bounds(facade.GetNumberOfNodes(), INVALID_EDGE_DURATION);
     std::vector<bool> from_clique_arc(facade.GetNumberOfNodes(), false);
@@ -211,8 +360,7 @@ std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
             continue;
         }
 
-        const auto level =
-            GetNodeQueryLevel(partition, current.node, source, target, restriction);
+        const auto level = query_level_policy.GetNodeQueryLevel(current.node, restriction);
 
         if (level >= 1 && !from_clique_arc[current.node])
         {
@@ -301,6 +449,20 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
                                   const engine::temporal::TemporalClock departure_clock,
                                   const SearchRestriction &restriction)
 {
+    const PairQueryLevelPolicy pair_query_level_policy{
+        facade.GetMultiLevelPartition(), source, target};
+    return SearchAtClock(
+        facade, source, target, departure_clock, restriction, pair_query_level_policy);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath SearchAtClock(const FacadeT &facade,
+                                  const DirectedPhantomEndpoint &source,
+                                  const DirectedPhantomEndpoint &target,
+                                  const engine::temporal::TemporalClock departure_clock,
+                                  const SearchRestriction &restriction,
+                                  const QueryLevelPolicyT &query_level_policy)
+{
     TemporalOverlayPath best_path;
 
     if (source.node == target.node)
@@ -311,7 +473,7 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
     }
 
     const auto reverse_lower_bounds =
-        ComputeReverseLowerBounds(facade, source, target, restriction);
+        ComputeReverseLowerBounds(facade, target, restriction, query_level_policy);
     if (source.node >= reverse_lower_bounds.size() ||
         reverse_lower_bounds[source.node] == INVALID_EDGE_DURATION)
     {
@@ -392,7 +554,7 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
         const auto current_clock =
             engine::temporal::AdvanceTemporalClock(departure_clock, current.cost);
         const auto current_level =
-            GetNodeQueryLevel(partition, current.node, source, target, restriction);
+            query_level_policy.GetNodeQueryLevel(current.node, restriction);
 
         if (current_level >= 1 && !from_clique_arc[current.node])
         {
@@ -499,8 +661,27 @@ TemporalOverlayPath SearchImpl(const FacadeT &facade,
                                const std::time_t departure_timestamp,
                                const SearchRestriction &restriction)
 {
+    const PairQueryLevelPolicy pair_query_level_policy{
+        facade.GetMultiLevelPartition(), source, target};
+    return SearchImpl(
+        facade, source, target, departure_timestamp, restriction, pair_query_level_policy);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath SearchImpl(const FacadeT &facade,
+                               const DirectedPhantomEndpoint &source,
+                               const DirectedPhantomEndpoint &target,
+                               const std::time_t departure_timestamp,
+                               const SearchRestriction &restriction,
+                               const QueryLevelPolicyT &query_level_policy)
+{
     return SearchAtClock(
-        facade, source, target, engine::temporal::ToTemporalClock(departure_timestamp), restriction);
+        facade,
+        source,
+        target,
+        engine::temporal::ToTemporalClock(departure_timestamp),
+        restriction,
+        query_level_policy);
 }
 
 template <typename FacadeT>
@@ -619,6 +800,21 @@ TemporalOverlayPath Search(const FacadeT &facade,
                               target,
                               departure_timestamp,
                               detail::SearchRestriction{});
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath Search(const FacadeT &facade,
+                           const DirectedPhantomEndpoint &source,
+                           const DirectedPhantomEndpoint &target,
+                           const std::time_t departure_timestamp,
+                           const QueryLevelPolicyT &query_level_policy)
+{
+    return detail::SearchImpl(facade,
+                              source,
+                              target,
+                              departure_timestamp,
+                              detail::SearchRestriction{},
+                              query_level_policy);
 }
 
 template <typename FacadeT>
