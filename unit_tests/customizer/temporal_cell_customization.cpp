@@ -261,6 +261,63 @@ BOOST_AUTO_TEST_CASE(level_one_temporal_cell_customization_reuses_existing_ident
     BOOST_CHECK_EQUAL(function_storage.values.size(), 4U);
 }
 
+BOOST_AUTO_TEST_CASE(level_one_temporal_cell_customization_keeps_multiple_destination_profiles_separate)
+{
+    std::vector<CellID> l1{{0, 0, 0, 1, 1}};
+    MultiLevelPartition mlp{{l1}, {2}};
+
+    const std::vector<MockEdge> edges = {
+        {0, 1, EdgeWeight{1}},
+        {0, 2, EdgeWeight{1}},
+        {0, 3, EdgeWeight{1}},
+        {1, 4, EdgeWeight{1}},
+        {2, 4, EdgeWeight{1}},
+    };
+
+    auto graph = makeGraph(mlp, edges);
+    std::vector<bool> allowed_nodes(graph.GetNumberOfNodes(), true);
+
+    CellStorage cell_storage(mlp, graph);
+    auto temporal_metric = MakeTemporalCellMetric(cell_storage);
+    TemporalFunctionStorage function_storage;
+    function_storage.meta.bucket_size_minutes = 5;
+    function_storage.meta.week_bucket_count = 4;
+    function_storage.meta.encoding_version = TEMPORAL_FUNCTION_ENCODING_VERSION_DENSE;
+
+    MockTemporalEvaluator evaluator;
+    evaluator.durations[{0, 1}] = {1, 2, 3, 4};
+    evaluator.durations[{1, 0}] = {1, 2, 3, 4};
+    evaluator.durations[{0, 2}] = {4, 3, 2, 1};
+    evaluator.durations[{2, 0}] = {4, 3, 2, 1};
+    evaluator.durations[{0, 3}] = {100, 100, 100, 100};
+    evaluator.durations[{3, 0}] = {100, 100, 100, 100};
+    evaluator.durations[{1, 4}] = {100, 100, 100, 100};
+    evaluator.durations[{4, 1}] = {100, 100, 100, 100};
+    evaluator.durations[{2, 4}] = {100, 100, 100, 100};
+    evaluator.durations[{4, 2}] = {100, 100, 100, 100};
+
+    TemporalCellCustomizer customizer(mlp);
+    TemporalCellCustomizer::Heap heap(graph.GetNumberOfNodes());
+    customizer.Customize(
+        graph, heap, cell_storage, allowed_nodes, evaluator, temporal_metric, function_storage, 1, 0);
+
+    const auto metric_cell = temporal_metric.GetCell(cell_storage, 1, 0);
+    const auto function_id_01 = FindFunctionID(metric_cell, 0, 1);
+    const auto function_id_02 = FindFunctionID(metric_cell, 0, 2);
+    BOOST_REQUIRE_NE(function_id_01, INVALID_TEMPORAL_FUNCTION_ID);
+    BOOST_REQUIRE_NE(function_id_02, INVALID_TEMPORAL_FUNCTION_ID);
+
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(function_storage.GetDuration(function_id_01, 0)), 1);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(function_storage.GetDuration(function_id_01, 1)), 2);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(function_storage.GetDuration(function_id_01, 2)), 3);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(function_storage.GetDuration(function_id_01, 3)), 4);
+
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(function_storage.GetDuration(function_id_02, 0)), 4);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(function_storage.GetDuration(function_id_02, 1)), 3);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(function_storage.GetDuration(function_id_02, 2)), 2);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(function_storage.GetDuration(function_id_02, 3)), 1);
+}
+
 BOOST_AUTO_TEST_CASE(level_one_temporal_cell_customization_marks_non_fifo_profiles)
 {
     std::vector<CellID> l1{{0, 0, 1, 1}};

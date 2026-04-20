@@ -123,6 +123,44 @@ std::vector<CellMetric> customizeFilteredMetrics(const partitioner::MultiLevelEd
     return metrics;
 }
 
+std::vector<TemporalProfileID>
+buildTemporalOverlayNodeProfileIDs(const extractor::EdgeBasedNodeDataContainer &node_data,
+                                   const TemporalProfileIndex &profile_index)
+{
+    std::vector<TemporalProfileID> profile_ids(node_data.NumberOfNodes(),
+                                               INVALID_TEMPORAL_PROFILE_ID);
+    for (NodeID node = 0; node < profile_ids.size(); ++node)
+    {
+        const auto geometry_id = node_data.GetGeometryID(node);
+        profile_ids[node] = geometry_id.forward
+                                ? profile_index.GetForwardProfileID(geometry_id.id)
+                                : profile_index.GetReverseProfileID(geometry_id.id);
+    }
+
+    return profile_ids;
+}
+
+template <typename GraphT>
+std::vector<EdgeDuration>
+buildTemporalOverlayEdgeTurnDurations(const GraphT &graph,
+                                      const std::vector<EdgeDuration> &node_durations)
+{
+    std::vector<EdgeDuration> edge_turn_durations(graph.GetNumberOfEdges(),
+                                                  INVALID_EDGE_DURATION);
+    for (NodeID from = 0; from < graph.GetNumberOfNodes(); ++from)
+    {
+        const auto static_node_duration = node_durations[from];
+        for (const auto edge : graph.GetAdjacentEdgeRange(from))
+        {
+            const auto static_edge_duration = EdgeDuration{graph.GetEdgeData(edge).duration};
+            edge_turn_durations[edge] = engine::temporal::detail::SafeDurationSubFloorZero(
+                static_edge_duration, static_node_duration);
+        }
+    }
+
+    return edge_turn_durations;
+}
+
 struct TemporalOverlayEvaluator
 {
     const extractor::EdgeBasedNodeDataContainer &node_data;
@@ -130,6 +168,8 @@ struct TemporalOverlayEvaluator
     const TemporalProfileIndex *profile_index = nullptr;
     const TemporalProfileStorage *profile_storage = nullptr;
     const DenseTemporalProfileCache *dense_profile_cache = nullptr;
+    const std::vector<TemporalProfileID> *node_profile_ids = nullptr;
+    const std::vector<EdgeDuration> *edge_turn_durations = nullptr;
     std::uint32_t bucket_size_minutes = 0;
     std::uint32_t week_bucket_count = 0;
 
@@ -163,12 +203,19 @@ struct TemporalOverlayEvaluator
         const auto static_node_duration = node_durations[from];
         auto node_duration = static_node_duration;
 
-        if (profile_index != nullptr && profile_storage != nullptr)
+        if (profile_storage != nullptr)
         {
-            const auto geometry_id = node_data.GetGeometryID(from);
-            const auto profile_id = geometry_id.forward
-                                        ? profile_index->GetForwardProfileID(geometry_id.id)
-                                        : profile_index->GetReverseProfileID(geometry_id.id);
+            const auto profile_id =
+                node_profile_ids != nullptr && from < node_profile_ids->size()
+                    ? (*node_profile_ids)[from]
+                    : (profile_index != nullptr
+                           ? [&]() {
+                                 const auto geometry_id = node_data.GetGeometryID(from);
+                                 return geometry_id.forward
+                                            ? profile_index->GetForwardProfileID(geometry_id.id)
+                                            : profile_index->GetReverseProfileID(geometry_id.id);
+                             }()
+                           : INVALID_TEMPORAL_PROFILE_ID);
             if (profile_id != INVALID_TEMPORAL_PROFILE_ID)
             {
                 const auto week_bucket =
@@ -187,9 +234,11 @@ struct TemporalOverlayEvaluator
             }
         }
 
-        const auto static_edge_duration = EdgeDuration{graph.GetEdgeData(edge).duration};
-        const auto turn_duration = engine::temporal::detail::SafeDurationSubFloorZero(
-            static_edge_duration, static_node_duration);
+        const auto turn_duration =
+            edge_turn_durations != nullptr && edge < edge_turn_durations->size()
+                ? (*edge_turn_durations)[edge]
+                : engine::temporal::detail::SafeDurationSubFloorZero(
+                      EdgeDuration{graph.GetEdgeData(edge).duration}, static_node_duration);
         return engine::temporal::detail::SafeDurationAdd(node_duration, turn_duration);
     }
 };
@@ -337,6 +386,9 @@ int Customizer::Run(const CustomizationConfig &config)
         std::optional<TemporalProfileIndex> temporal_profile_index;
         std::optional<TemporalProfileStorage> temporal_profile_storage;
         std::optional<DenseTemporalProfileCache> dense_temporal_profile_cache;
+        std::optional<std::vector<TemporalProfileID>> temporal_node_profile_ids;
+        std::vector<EdgeDuration> temporal_edge_turn_durations =
+            buildTemporalOverlayEdgeTurnDurations(graph, node_durations);
         if (has_complete_temporal_sidecar)
         {
             temporal_profile_index.emplace();
@@ -345,6 +397,8 @@ int Customizer::Run(const CustomizationConfig &config)
             files::readTemporalProfiles(temporal_profiles_path, *temporal_profile_storage);
             files::readTemporalMeta(temporal_meta_path, *temporal_profile_storage);
             dense_temporal_profile_cache.emplace(*temporal_profile_storage);
+            temporal_node_profile_ids.emplace(
+                buildTemporalOverlayNodeProfileIDs(node_data, *temporal_profile_index));
         }
 
         TemporalFunctionStorage temporal_overlay_storage;
@@ -395,25 +449,34 @@ int Customizer::Run(const CustomizationConfig &config)
             util::Log() << "Prepared dense temporal base cache with "
                         << dense_temporal_profile_cache->profile_count << " profile(s), bytes="
                         << dense_temporal_profile_cache->GetStorageBytes();
+            util::Log() << "Prepared temporal overlay base metadata cache with "
+                        << temporal_node_profile_ids->size() << " node profile id(s) and "
+                        << temporal_edge_turn_durations.size() << " edge turn duration(s)";
         }
         else
         {
             util::Log(logWARNING)
                 << "Temporal overlay customization is running without a pre-existing temporal "
                    "base sidecar; base graph durations will stay static";
+            util::Log() << "Prepared temporal overlay turn-duration cache with "
+                        << temporal_edge_turn_durations.size() << " edge turn duration(s)";
         }
 
         TemporalOverlayEvaluator evaluator{node_data,
                                            node_durations,
-                                            temporal_profile_index ? &*temporal_profile_index
-                                                                   : nullptr,
-                                            temporal_profile_storage ? &*temporal_profile_storage
-                                                                     : nullptr,
-                                            dense_temporal_profile_cache
-                                                ? &*dense_temporal_profile_cache
-                                                : nullptr,
-                                            temporal_overlay_storage.meta.bucket_size_minutes,
-                                            temporal_overlay_storage.meta.week_bucket_count};
+                                           temporal_profile_index ? &*temporal_profile_index
+                                                                  : nullptr,
+                                           temporal_profile_storage ? &*temporal_profile_storage
+                                                                    : nullptr,
+                                           dense_temporal_profile_cache
+                                               ? &*dense_temporal_profile_cache
+                                               : nullptr,
+                                           temporal_node_profile_ids
+                                               ? &*temporal_node_profile_ids
+                                               : nullptr,
+                                           &temporal_edge_turn_durations,
+                                           temporal_overlay_storage.meta.bucket_size_minutes,
+                                           temporal_overlay_storage.meta.week_bucket_count};
         const auto temporal_metrics = customizeFilteredTemporalMetrics(
             graph,
             storage,

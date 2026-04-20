@@ -137,6 +137,18 @@ class TemporalCellCustomizer
         return EdgeDuration{static_cast<EdgeDuration::value_type>(clamped)};
     }
 
+    static std::uint32_t NextGeneration(std::vector<std::uint32_t> &generations,
+                                        std::uint32_t &current_generation)
+    {
+        if (current_generation == std::numeric_limits<std::uint32_t>::max())
+        {
+            std::fill(generations.begin(), generations.end(), 0U);
+            current_generation = 0;
+        }
+
+        return ++current_generation;
+    }
+
     static DeduplicatedFunctionKey
     MakeFunctionKey(const std::uint32_t encoding_version,
                     const EdgeDuration minimum_duration,
@@ -443,11 +455,21 @@ class TemporalCellCustomizer
         util::QueryHeap<NodeID, NodeID, EdgeDuration, HeapData, util::ArrayStorage<NodeID, int>>;
 
   private:
+    struct ComputeScratch
+    {
+        std::vector<NodeID> destination_nodes;
+        std::unordered_map<NodeID, std::size_t> destination_lookup;
+        std::vector<TemporalFunctionBucketValue> dense_function_values;
+        std::vector<std::uint32_t> destination_generations;
+        std::uint32_t current_generation = 0;
+    };
+
     struct WorkerState
     {
         explicit WorkerState(const NodeID number_of_nodes) : heap(number_of_nodes) {}
 
         Heap heap;
+        ComputeScratch scratch;
     };
 
     static constexpr std::size_t PARALLEL_CELL_CHUNK_SIZE = 32;
@@ -482,8 +504,10 @@ class TemporalCellCustomizer
         {
             dense_function_cache.emplace(storage, storage.profile_offsets.size());
         }
+        ComputeScratch scratch;
         auto computed = ComputeCell(graph,
                                     heap,
+                                    scratch,
                                     cells,
                                     allowed_nodes,
                                     evaluator,
@@ -513,8 +537,10 @@ class TemporalCellCustomizer
         {
             dense_function_cache.emplace(storage, storage.profile_offsets.size());
         }
+        ComputeScratch scratch;
         auto computed = ComputeCell(graph,
                                     heap,
+                                    scratch,
                                     cells,
                                     allowed_nodes,
                                     evaluator,
@@ -529,6 +555,7 @@ class TemporalCellCustomizer
     template <typename GraphT, typename EvaluatorT>
     ComputedCellResult ComputeCell(const GraphT &graph,
                                    Heap &heap,
+                                   ComputeScratch &scratch,
                                    const partitioner::CellStorage &cells,
                                    const std::vector<bool> &allowed_nodes,
                                    const EvaluatorT &evaluator,
@@ -543,17 +570,20 @@ class TemporalCellCustomizer
         const auto &cell_data = cells.GetCellData(level, id);
         const auto destinations = cell.GetDestinationNodes();
         const auto sources = cell.GetSourceNodes();
-        std::vector<NodeID> destination_nodes(destinations.begin(), destinations.end());
+        scratch.destination_nodes.assign(destinations.begin(), destinations.end());
+        const auto &destination_nodes = scratch.destination_nodes;
         const auto destination_count = destination_nodes.size();
-        std::unordered_map<NodeID, std::size_t> destination_lookup;
-        destination_lookup.reserve(destination_nodes.size());
+        scratch.destination_lookup.clear();
+        scratch.destination_lookup.reserve(destination_nodes.size());
         for (std::size_t destination_index = 0; destination_index < destination_nodes.size();
              ++destination_index)
         {
-            destination_lookup.emplace(destination_nodes[destination_index], destination_index);
+            scratch.destination_lookup.emplace(destination_nodes[destination_index],
+                                              destination_index);
         }
 
         const auto bucket_count = storage.meta.week_bucket_count;
+        const auto bucket_count_size = static_cast<std::size_t>(bucket_count);
         result.processed_source_rows =
             static_cast<std::uint64_t>(std::distance(sources.begin(), sources.end()));
         result.entries.reserve(static_cast<std::size_t>(result.processed_source_rows) *
@@ -577,11 +607,14 @@ class TemporalCellCustomizer
                 continue;
             }
 
-            std::vector<std::vector<TemporalFunctionBucketValue>> dense_functions(
-                destination_nodes.size(),
-                std::vector<TemporalFunctionBucketValue>(bucket_count,
-                                                         from_alias<TemporalFunctionBucketValue>(
-                                                             INVALID_EDGE_DURATION)));
+            scratch.dense_function_values.resize(destination_count * bucket_count_size);
+            std::fill(scratch.dense_function_values.begin(),
+                      scratch.dense_function_values.end(),
+                      from_alias<TemporalFunctionBucketValue>(INVALID_EDGE_DURATION));
+            if (scratch.destination_generations.size() < destination_count)
+            {
+                scratch.destination_generations.resize(destination_count, 0U);
+            }
 
             for (std::uint32_t departure_bucket = 0; departure_bucket < bucket_count;
                  ++departure_bucket)
@@ -589,21 +622,26 @@ class TemporalCellCustomizer
                 ++result.diagnostics.bucket_iterations;
                 heap.Clear();
                 heap.Insert(source, EdgeDuration{0}, {false});
-                auto remaining = destination_lookup;
+                auto remaining_count = destination_count;
+                const auto current_generation =
+                    NextGeneration(scratch.destination_generations, scratch.current_generation);
 
-                while (!heap.Empty() && !remaining.empty())
+                while (!heap.Empty() && remaining_count > 0)
                 {
                     ++result.diagnostics.heap_pops;
                     const auto node = heap.DeleteMin();
                     const auto current_duration = heap.GetKey(node);
 
-                    const auto found = remaining.find(node);
-                    if (found != remaining.end())
+                    const auto found = scratch.destination_lookup.find(node);
+                    if (found != scratch.destination_lookup.end() &&
+                        scratch.destination_generations[found->second] != current_generation)
                     {
                         ++result.diagnostics.destination_hits;
-                        dense_functions[found->second][departure_bucket] =
+                        scratch.destination_generations[found->second] = current_generation;
+                        scratch.dense_function_values[found->second * bucket_count_size +
+                                                      departure_bucket] =
                             from_alias<TemporalFunctionBucketValue>(current_duration);
-                        remaining.erase(found);
+                        --remaining_count;
                     }
 
                     RelaxNode(graph,
@@ -625,9 +663,11 @@ class TemporalCellCustomizer
             for (std::size_t destination_index = 0; destination_index < destination_nodes.size();
                  ++destination_index)
             {
-                auto &profile = dense_functions[destination_index];
+                const auto profile_begin = scratch.dense_function_values.begin() +
+                                           destination_index * bucket_count_size;
+                const auto profile_end = profile_begin + bucket_count_size;
                 const auto has_invalid_bucket =
-                    std::any_of(profile.begin(), profile.end(), [](const auto duration) {
+                    std::any_of(profile_begin, profile_end, [](const auto duration) {
                         return duration ==
                                from_alias<TemporalFunctionBucketValue>(INVALID_EDGE_DURATION);
                     });
@@ -641,8 +681,10 @@ class TemporalCellCustomizer
                 }
 
                 ++result.diagnostics.prepared_destination_profiles;
-                result.entries.push_back(
-                    {metric_index, PrepareFunction(storage.meta, std::move(profile))});
+                result.entries.push_back({metric_index,
+                                          PrepareFunction(storage.meta,
+                                                          std::vector<TemporalFunctionBucketValue>(
+                                                              profile_begin, profile_end))});
             }
         }
 
@@ -793,14 +835,15 @@ class TemporalCellCustomizer
                             computed_cells[id - chunk_begin] =
                                 ComputeCell(graph,
                                             worker.heap,
+                                            worker.scratch,
                                             cells,
                                             allowed_nodes,
-                                             evaluator,
-                                             metric,
-                                             storage,
-                                             dense_function_cache_ptr,
-                                             static_cast<LevelID>(level),
-                                             static_cast<CellID>(id));
+                                            evaluator,
+                                            metric,
+                                            storage,
+                                            dense_function_cache_ptr,
+                                            static_cast<LevelID>(level),
+                                            static_cast<CellID>(id));
                         }
                     });
                 const auto chunk_compute_ms = static_cast<std::uint64_t>(
@@ -936,6 +979,7 @@ class TemporalCellCustomizer
         }
 
         Heap heap(graph.GetNumberOfNodes());
+        ComputeScratch scratch;
         auto deduplicated_functions = BuildDeduplicatedFunctionIndex(storage);
 
         for (std::size_t level = begin_level; level <= end_level; ++level)
@@ -951,6 +995,7 @@ class TemporalCellCustomizer
             {
                 auto computed = ComputeCell(graph,
                                             heap,
+                                            scratch,
                                             cells,
                                             allowed_nodes,
                                             evaluator,
