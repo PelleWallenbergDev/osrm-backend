@@ -167,6 +167,93 @@ struct TemporalProfileStorageView
 };
 using TemporalFunctionStorageView = TemporalProfileStorageView;
 
+struct DenseTemporalProfileCache
+{
+    TemporalProfileMeta meta;
+    std::size_t profile_count = 0;
+    std::vector<TemporalProfileBucketValue> decoded_values;
+
+    DenseTemporalProfileCache() = default;
+
+    template <typename StorageT>
+    explicit DenseTemporalProfileCache(
+        const StorageT &storage,
+        const std::size_t profile_count_limit = std::numeric_limits<std::size_t>::max())
+    {
+        Assign(storage, profile_count_limit);
+    }
+
+    template <typename StorageT>
+    void Assign(const StorageT &storage,
+                const std::size_t profile_count_limit = std::numeric_limits<std::size_t>::max())
+    {
+        meta.bucket_size_minutes = storage.GetBucketSizeMinutes();
+        meta.week_bucket_count = storage.GetWeekBucketCount();
+        meta.encoding_version = TEMPORAL_PROFILE_ENCODING_VERSION_DENSE;
+        profile_count = std::min<std::size_t>(storage.profile_offsets.size(), profile_count_limit);
+        decoded_values.clear();
+
+        if (profile_count == 0 || meta.week_bucket_count == 0)
+        {
+            return;
+        }
+
+        decoded_values.resize(profile_count * meta.week_bucket_count,
+                              from_alias<TemporalProfileBucketValue>(INVALID_EDGE_DURATION));
+
+        const auto can_copy_dense_values = storage.GetEncodingVersion() ==
+                                               TEMPORAL_PROFILE_ENCODING_VERSION_DENSE &&
+                                           storage.profile_sizes.size() >= profile_count;
+
+        for (TemporalProfileID profile_id = 0; profile_id < profile_count; ++profile_id)
+        {
+            const auto destination_offset =
+                static_cast<std::size_t>(profile_id) * meta.week_bucket_count;
+            if (can_copy_dense_values)
+            {
+                const auto profile_size = static_cast<std::size_t>(storage.profile_sizes[profile_id]);
+                const auto source_offset =
+                    static_cast<std::size_t>(storage.profile_offsets[profile_id]);
+                if (profile_size == meta.week_bucket_count &&
+                    source_offset + profile_size <= storage.values.size())
+                {
+                    std::copy_n(storage.values.begin() + source_offset,
+                                meta.week_bucket_count,
+                                decoded_values.begin() + destination_offset);
+                    continue;
+                }
+            }
+
+            for (std::uint32_t week_bucket = 0; week_bucket < meta.week_bucket_count; ++week_bucket)
+            {
+                decoded_values[destination_offset + week_bucket] =
+                    from_alias<TemporalProfileBucketValue>(
+                        storage.GetDuration(profile_id, week_bucket));
+            }
+        }
+    }
+
+    bool HasProfile(const TemporalProfileID id) const { return id < profile_count; }
+
+    EdgeDuration GetDuration(const TemporalProfileID id, const std::uint32_t week_bucket) const
+    {
+        if (!HasProfile(id) || week_bucket >= meta.week_bucket_count)
+        {
+            return INVALID_EDGE_DURATION;
+        }
+
+        return EdgeDuration{
+            decoded_values[static_cast<std::size_t>(id) * meta.week_bucket_count + week_bucket]};
+    }
+
+    std::uint64_t GetStorageBytes() const
+    {
+        return static_cast<std::uint64_t>(decoded_values.size()) *
+               sizeof(TemporalProfileBucketValue);
+    }
+};
+using DenseTemporalFunctionCache = DenseTemporalProfileCache;
+
 namespace detail
 {
 template <typename StorageT>

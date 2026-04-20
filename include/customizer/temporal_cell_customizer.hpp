@@ -333,6 +333,7 @@ class TemporalCellCustomizer
                    const EvaluatorT &evaluator,
                    const TemporalCellMetric &metric,
                    const TemporalFunctionStorage &storage,
+                   const DenseTemporalFunctionCache *dense_function_cache,
                    ComputeDiagnostics &diagnostics,
                    util::QueryHeap<NodeID,
                                    NodeID,
@@ -368,7 +369,11 @@ class TemporalCellCustomizer
                 {
                     ++diagnostics.shortcut_duration_decodes;
                     const auto shortcut_duration =
-                        storage.GetDuration(subcell_function_id, evaluation_bucket);
+                        dense_function_cache != nullptr &&
+                                dense_function_cache->HasProfile(subcell_function_id)
+                            ? dense_function_cache->GetDuration(subcell_function_id,
+                                                                evaluation_bucket)
+                            : storage.GetDuration(subcell_function_id, evaluation_bucket);
                     const auto to_duration = SafeAddDuration(current_duration, shortcut_duration);
                     if (to_duration != INVALID_EDGE_DURATION)
                     {
@@ -472,8 +477,21 @@ class TemporalCellCustomizer
     {
         InitializeStorageMeta(storage, evaluator);
         auto deduplicated_functions = BuildDeduplicatedFunctionIndex(storage);
-        auto computed =
-            ComputeCell(graph, heap, cells, allowed_nodes, evaluator, metric, storage, level, id);
+        std::optional<DenseTemporalFunctionCache> dense_function_cache;
+        if (level > 1 && !storage.profile_offsets.empty() && storage.meta.week_bucket_count > 0)
+        {
+            dense_function_cache.emplace(storage, storage.profile_offsets.size());
+        }
+        auto computed = ComputeCell(graph,
+                                    heap,
+                                    cells,
+                                    allowed_nodes,
+                                    evaluator,
+                                    metric,
+                                    storage,
+                                    dense_function_cache ? &*dense_function_cache : nullptr,
+                                    level,
+                                    id);
         CommitCellResult(metric, storage, deduplicated_functions, std::move(computed));
     }
 
@@ -490,8 +508,21 @@ class TemporalCellCustomizer
                        const CellID id) const
     {
         InitializeStorageMeta(storage, evaluator);
-        auto computed =
-            ComputeCell(graph, heap, cells, allowed_nodes, evaluator, metric, storage, level, id);
+        std::optional<DenseTemporalFunctionCache> dense_function_cache;
+        if (level > 1 && !storage.profile_offsets.empty() && storage.meta.week_bucket_count > 0)
+        {
+            dense_function_cache.emplace(storage, storage.profile_offsets.size());
+        }
+        auto computed = ComputeCell(graph,
+                                    heap,
+                                    cells,
+                                    allowed_nodes,
+                                    evaluator,
+                                    metric,
+                                    storage,
+                                    dense_function_cache ? &*dense_function_cache : nullptr,
+                                    level,
+                                    id);
         CommitCellResult(metric, storage, deduplicated_functions, std::move(computed));
     }
 
@@ -503,6 +534,7 @@ class TemporalCellCustomizer
                                    const EvaluatorT &evaluator,
                                    const TemporalCellMetric &metric,
                                    const TemporalFunctionStorage &storage,
+                                   const DenseTemporalFunctionCache *dense_function_cache,
                                    const LevelID level,
                                    const CellID id) const
     {
@@ -580,6 +612,7 @@ class TemporalCellCustomizer
                               evaluator,
                               metric,
                               storage,
+                              dense_function_cache,
                               result.diagnostics,
                               heap,
                               level,
@@ -725,6 +758,17 @@ class TemporalCellCustomizer
             std::uint64_t commit_time_ms_total = 0;
             ComputeDiagnostics level_compute_diagnostics;
             CommitDiagnostics level_commit_diagnostics;
+            std::optional<DenseTemporalFunctionCache> dense_function_cache;
+            if (level > 1 && !storage.profile_offsets.empty() && storage.meta.week_bucket_count > 0)
+            {
+                dense_function_cache.emplace(storage, storage.profile_offsets.size());
+                util::Log() << "Temporal overlay customization: prepared level " << level
+                            << " dense lower-level shortcut cache with "
+                            << dense_function_cache->profile_count << " function(s), bytes="
+                            << dense_function_cache->GetStorageBytes();
+            }
+            const auto *dense_function_cache_ptr =
+                dense_function_cache ? &*dense_function_cache : nullptr;
 
             util::Log() << "Temporal overlay customization: starting level " << level
                         << " with " << level_cell_count << " cell(s), bucket_count="
@@ -751,10 +795,11 @@ class TemporalCellCustomizer
                                             worker.heap,
                                             cells,
                                             allowed_nodes,
-                                            evaluator,
-                                            metric,
-                                            storage,
-                                            static_cast<LevelID>(level),
+                                             evaluator,
+                                             metric,
+                                             storage,
+                                             dense_function_cache_ptr,
+                                             static_cast<LevelID>(level),
                                              static_cast<CellID>(id));
                         }
                     });
@@ -897,6 +942,11 @@ class TemporalCellCustomizer
         {
             const auto level_cell_count =
                 static_cast<std::size_t>(partition.GetNumberOfCells(static_cast<LevelID>(level)));
+            std::optional<DenseTemporalFunctionCache> dense_function_cache;
+            if (level > 1 && !storage.profile_offsets.empty() && storage.meta.week_bucket_count > 0)
+            {
+                dense_function_cache.emplace(storage, storage.profile_offsets.size());
+            }
             for (std::size_t id = 0; id < level_cell_count; ++id)
             {
                 auto computed = ComputeCell(graph,
@@ -906,6 +956,7 @@ class TemporalCellCustomizer
                                             evaluator,
                                             metric,
                                             storage,
+                                            dense_function_cache ? &*dense_function_cache : nullptr,
                                             static_cast<LevelID>(level),
                                             static_cast<CellID>(id));
                 CommitCellResult(metric, storage, deduplicated_functions, std::move(computed));

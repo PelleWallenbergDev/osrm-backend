@@ -418,6 +418,66 @@ BOOST_AUTO_TEST_CASE(level_one_temporal_cell_customization_marks_fallback_dct_pr
                       2.1);
 }
 
+BOOST_AUTO_TEST_CASE(dense_temporal_function_cache_matches_dct_storage)
+{
+    std::vector<CellID> l1{{0, 0, 1, 1, 2, 2}};
+    std::vector<CellID> l2{{0, 0, 0, 0, 1, 1}};
+    std::vector<CellID> l3{{0, 0, 0, 0, 0, 0}};
+    MultiLevelPartition mlp{{l1, l2, l3}, {3, 2, 1}};
+
+    const std::vector<MockEdge> edges = {
+        {0, 1, EdgeWeight{1}},
+        {1, 2, EdgeWeight{1}},
+        {2, 3, EdgeWeight{1}},
+        {4, 5, EdgeWeight{1}},
+        {0, 4, EdgeWeight{1}},
+        {3, 4, EdgeWeight{1}},
+    };
+
+    auto graph = makeGraph(mlp, edges);
+    std::vector<bool> allowed_nodes(graph.GetNumberOfNodes(), true);
+
+    CellStorage cell_storage(mlp, graph);
+    auto temporal_metric = MakeTemporalCellMetric(cell_storage);
+    TemporalFunctionStorage function_storage;
+    function_storage.meta.bucket_size_minutes = 5;
+    function_storage.meta.week_bucket_count = 4;
+    function_storage.meta.encoding_version = TEMPORAL_FUNCTION_ENCODING_VERSION_DCT;
+
+    MockTemporalEvaluator evaluator;
+    evaluator.durations[{0, 1}] = {1, 2, 3, 4};
+    evaluator.durations[{1, 0}] = {1, 2, 3, 4};
+    evaluator.durations[{1, 2}] = {10, 10, 10, 10};
+    evaluator.durations[{2, 1}] = {10, 10, 10, 10};
+    evaluator.durations[{2, 3}] = {2, 2, 2, 2};
+    evaluator.durations[{3, 2}] = {2, 2, 2, 2};
+    evaluator.durations[{4, 5}] = {1, 1, 1, 1};
+    evaluator.durations[{5, 4}] = {1, 1, 1, 1};
+    evaluator.durations[{0, 4}] = {100, 100, 100, 100};
+    evaluator.durations[{4, 0}] = {100, 100, 100, 100};
+    evaluator.durations[{3, 4}] = {100, 100, 100, 100};
+    evaluator.durations[{4, 3}] = {100, 100, 100, 100};
+
+    TemporalCellCustomizer customizer(mlp, 4);
+    customizer.Customize(
+        graph, cell_storage, allowed_nodes, evaluator, temporal_metric, function_storage);
+
+    DenseTemporalFunctionCache dense_cache(function_storage);
+    BOOST_REQUIRE_EQUAL(dense_cache.profile_count, function_storage.profile_offsets.size());
+    BOOST_REQUIRE_EQUAL(dense_cache.meta.week_bucket_count, function_storage.meta.week_bucket_count);
+
+    for (TemporalFunctionID function_id = 0; function_id < function_storage.profile_offsets.size();
+         ++function_id)
+    {
+        for (std::uint32_t bucket = 0; bucket < function_storage.meta.week_bucket_count; ++bucket)
+        {
+            BOOST_CHECK_EQUAL(
+                from_alias<std::int32_t>(dense_cache.GetDuration(function_id, bucket)),
+                from_alias<std::int32_t>(function_storage.GetDuration(function_id, bucket)));
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(temporal_cell_customization_can_limit_selected_levels)
 {
     std::vector<CellID> l1{{0, 0, 1, 1, 2, 2}};

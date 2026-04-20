@@ -129,6 +129,7 @@ struct TemporalOverlayEvaluator
     const std::vector<EdgeDuration> &node_durations;
     const TemporalProfileIndex *profile_index = nullptr;
     const TemporalProfileStorage *profile_storage = nullptr;
+    const DenseTemporalProfileCache *dense_profile_cache = nullptr;
     std::uint32_t bucket_size_minutes = 0;
     std::uint32_t week_bucket_count = 0;
 
@@ -173,7 +174,10 @@ struct TemporalOverlayEvaluator
                 const auto week_bucket =
                     week_bucket_count == 0 ? current_bucket
                                            : std::min(current_bucket, week_bucket_count - 1);
-                const auto temporal_duration = profile_storage->GetDuration(profile_id, week_bucket);
+                const auto temporal_duration =
+                    dense_profile_cache != nullptr && dense_profile_cache->HasProfile(profile_id)
+                        ? dense_profile_cache->GetDuration(profile_id, week_bucket)
+                        : profile_storage->GetDuration(profile_id, week_bucket);
                 if (temporal_duration != INVALID_EDGE_DURATION &&
                     engine::temporal::detail::IsPlausibleTemporalDuration(temporal_duration,
                                                                           static_node_duration))
@@ -332,6 +336,7 @@ int Customizer::Run(const CustomizationConfig &config)
 
         std::optional<TemporalProfileIndex> temporal_profile_index;
         std::optional<TemporalProfileStorage> temporal_profile_storage;
+        std::optional<DenseTemporalProfileCache> dense_temporal_profile_cache;
         if (has_complete_temporal_sidecar)
         {
             temporal_profile_index.emplace();
@@ -339,6 +344,7 @@ int Customizer::Run(const CustomizationConfig &config)
             files::readTemporalProfileIndex(temporal_index_path, *temporal_profile_index);
             files::readTemporalProfiles(temporal_profiles_path, *temporal_profile_storage);
             files::readTemporalMeta(temporal_meta_path, *temporal_profile_storage);
+            dense_temporal_profile_cache.emplace(*temporal_profile_storage);
         }
 
         TemporalFunctionStorage temporal_overlay_storage;
@@ -386,6 +392,9 @@ int Customizer::Run(const CustomizationConfig &config)
         {
             util::Log() << "Loaded temporal base sidecar for overlay customization with "
                         << temporal_profile_storage->profile_offsets.size() << " profile(s)";
+            util::Log() << "Prepared dense temporal base cache with "
+                        << dense_temporal_profile_cache->profile_count << " profile(s), bytes="
+                        << dense_temporal_profile_cache->GetStorageBytes();
         }
         else
         {
@@ -396,12 +405,15 @@ int Customizer::Run(const CustomizationConfig &config)
 
         TemporalOverlayEvaluator evaluator{node_data,
                                            node_durations,
-                                           temporal_profile_index ? &*temporal_profile_index
-                                                                  : nullptr,
-                                           temporal_profile_storage ? &*temporal_profile_storage
-                                                                    : nullptr,
-                                           temporal_overlay_storage.meta.bucket_size_minutes,
-                                           temporal_overlay_storage.meta.week_bucket_count};
+                                            temporal_profile_index ? &*temporal_profile_index
+                                                                   : nullptr,
+                                            temporal_profile_storage ? &*temporal_profile_storage
+                                                                     : nullptr,
+                                            dense_temporal_profile_cache
+                                                ? &*dense_temporal_profile_cache
+                                                : nullptr,
+                                            temporal_overlay_storage.meta.bucket_size_minutes,
+                                            temporal_overlay_storage.meta.week_bucket_count};
         const auto temporal_metrics = customizeFilteredTemporalMetrics(
             graph,
             storage,
