@@ -17,6 +17,7 @@
 #include <optional>
 #include <queue>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -82,6 +83,144 @@ struct QueueCompare
     {
         return from_alias<std::int32_t>(lhs.cost) > from_alias<std::int32_t>(rhs.cost);
     }
+};
+
+struct ReverseLowerBoundSearchStats
+{
+    std::size_t queue_pops = 0;
+    std::size_t clique_candidates = 0;
+    std::size_t border_edge_candidates = 0;
+    std::size_t lower_bound_updates = 0;
+};
+
+struct ReverseLowerBoundWorkspace
+{
+    std::vector<EdgeDuration> lower_bounds;
+    std::vector<bool> from_clique_arc;
+    std::vector<NodeID> touched_nodes;
+    std::priority_queue<QueueEntry, std::vector<QueueEntry>, QueueCompare> queue;
+
+    ReverseLowerBoundWorkspace() = default;
+    explicit ReverseLowerBoundWorkspace(const std::size_t number_of_nodes)
+        : lower_bounds(number_of_nodes, INVALID_EDGE_DURATION),
+          from_clique_arc(number_of_nodes, false)
+    {
+    }
+
+    void Reset(const std::size_t number_of_nodes)
+    {
+        if (lower_bounds.size() != number_of_nodes)
+        {
+            lower_bounds.assign(number_of_nodes, INVALID_EDGE_DURATION);
+            from_clique_arc.assign(number_of_nodes, false);
+        }
+        else
+        {
+            for (const auto node : touched_nodes)
+            {
+                if (node >= lower_bounds.size())
+                {
+                    continue;
+                }
+
+                lower_bounds[node] = INVALID_EDGE_DURATION;
+                from_clique_arc[node] = false;
+            }
+        }
+
+        touched_nodes.clear();
+        queue = decltype(queue){};
+    }
+};
+
+struct ReverseLowerBoundCacheKey
+{
+    NodeID target_node = SPECIAL_NODEID;
+    bool target_traversed_in_reverse = false;
+    bool restricted = false;
+    LevelID level = INVALID_LEVEL_ID;
+    CellID parent_cell = INVALID_CELL_ID;
+
+    bool operator==(const ReverseLowerBoundCacheKey &other) const
+    {
+        return target_node == other.target_node &&
+               target_traversed_in_reverse == other.target_traversed_in_reverse &&
+               restricted == other.restricted && level == other.level &&
+               parent_cell == other.parent_cell;
+    }
+};
+
+struct ReverseLowerBoundCacheKeyHasher
+{
+    std::size_t operator()(const ReverseLowerBoundCacheKey &key) const noexcept
+    {
+        std::size_t seed = std::hash<std::uint64_t>{}(static_cast<std::uint64_t>(key.target_node));
+        seed ^= std::hash<bool>{}(key.target_traversed_in_reverse) + 0x9e3779b9 + (seed << 6) +
+                (seed >> 2);
+        seed ^= std::hash<bool>{}(key.restricted) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<std::uint64_t>{}(static_cast<std::uint64_t>(key.level)) + 0x9e3779b9 +
+                (seed << 6) + (seed >> 2);
+        seed ^= std::hash<std::uint64_t>{}(static_cast<std::uint64_t>(key.parent_cell)) +
+                0x9e3779b9 + (seed << 6) + (seed >> 2);
+        return seed;
+    }
+};
+
+class ReverseLowerBoundCache
+{
+  public:
+    ReverseLowerBoundCache() = default;
+    explicit ReverseLowerBoundCache(const std::size_t number_of_nodes) : workspace(number_of_nodes)
+    {
+    }
+
+    template <typename FacadeT, typename QueryLevelPolicyT>
+    const std::vector<EdgeDuration> &GetOrCompute(const FacadeT &facade,
+                                                  const DirectedPhantomEndpoint &target,
+                                                  const SearchRestriction &restriction,
+                                                  const QueryLevelPolicyT &query_level_policy,
+                                                  ReverseLowerBoundSearchStats *stats = nullptr)
+    {
+        const auto key = ReverseLowerBoundCacheKey{
+            target.node, target.traversed_in_reverse, restriction.restricted, restriction.level,
+            restriction.parent_cell};
+
+        const auto cached = entries.find(key);
+        if (cached != entries.end())
+        {
+            ++hit_count;
+            if (stats != nullptr)
+            {
+                *stats = {};
+            }
+            return cached->second;
+        }
+
+        ++miss_count;
+        ReverseLowerBoundSearchStats local_stats;
+        auto &active_stats = stats != nullptr ? *stats : local_stats;
+        active_stats = {};
+
+        const auto &computed = ComputeReverseLowerBounds(
+            facade, target, restriction, query_level_policy, workspace, &active_stats);
+        auto [inserted, success] =
+            entries.emplace(key, std::vector<EdgeDuration>(computed.begin(), computed.end()));
+        (void)success;
+        return inserted->second;
+    }
+
+    std::size_t GetHitCount() const { return hit_count; }
+    std::size_t GetMissCount() const { return miss_count; }
+    std::size_t GetEntryCount() const { return entries.size(); }
+
+  private:
+    ReverseLowerBoundWorkspace workspace;
+    std::unordered_map<ReverseLowerBoundCacheKey,
+                       std::vector<EdgeDuration>,
+                       ReverseLowerBoundCacheKeyHasher>
+        entries;
+    std::size_t hit_count = 0;
+    std::size_t miss_count = 0;
 };
 
 template <typename FnT> inline void ForEachDescendingLevel(const LevelID start_level, FnT &&fn)
@@ -314,6 +453,243 @@ inline PackedPath BuildPackedPath(const std::vector<NodeID> &parents,
     return packed_path;
 }
 
+inline void UpdateReverseLowerBound(ReverseLowerBoundWorkspace &workspace,
+                                    ReverseLowerBoundSearchStats &stats,
+                                    const NodeID node,
+                                    const EdgeDuration candidate,
+                                    const bool via_clique_arc)
+{
+    if (node >= workspace.lower_bounds.size())
+    {
+        return;
+    }
+
+    if (workspace.lower_bounds[node] == INVALID_EDGE_DURATION)
+    {
+        workspace.touched_nodes.push_back(node);
+    }
+
+    workspace.lower_bounds[node] = candidate;
+    workspace.from_clique_arc[node] = via_clique_arc;
+    workspace.queue.push({candidate, node});
+    ++stats.lower_bound_updates;
+}
+
+template <typename FacadeT>
+void SeedReverseLowerBoundTarget(const FacadeT &facade,
+                                 const DirectedPhantomEndpoint &target,
+                                 ReverseLowerBoundWorkspace &workspace,
+                                 ReverseLowerBoundSearchStats &stats)
+{
+    if (target.node >= workspace.lower_bounds.size())
+    {
+        return;
+    }
+
+    const auto target_lower_bound = temporal::detail::GetPhantomTraversalLowerBound(facade, target);
+    if (target_lower_bound == INVALID_EDGE_DURATION)
+    {
+        return;
+    }
+
+    if (workspace.lower_bounds[target.node] != INVALID_EDGE_DURATION &&
+        target_lower_bound >= workspace.lower_bounds[target.node])
+    {
+        return;
+    }
+
+    UpdateReverseLowerBound(workspace, stats, target.node, target_lower_bound, false);
+}
+
+template <typename FacadeT>
+void InitializeReverseLowerBounds(const FacadeT &facade,
+                                  const DirectedPhantomEndpoint &target,
+                                  ReverseLowerBoundWorkspace &workspace,
+                                  ReverseLowerBoundSearchStats &stats)
+{
+    workspace.Reset(facade.GetNumberOfNodes());
+    SeedReverseLowerBoundTarget(facade, target, workspace, stats);
+}
+
+template <typename FacadeT>
+void InitializeReverseLowerBoundsForTargets(
+    const FacadeT &facade,
+    const std::vector<DirectedPhantomEndpoint> &targets,
+    ReverseLowerBoundWorkspace &workspace,
+    ReverseLowerBoundSearchStats &stats)
+{
+    workspace.Reset(facade.GetNumberOfNodes());
+
+    for (const auto &target : targets)
+    {
+        SeedReverseLowerBoundTarget(facade, target, workspace, stats);
+    }
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+void RelaxReverseShortcutPredecessors(const FacadeT &facade,
+                                      const NodeID current_node,
+                                      const EdgeDuration current_cost,
+                                      const LevelID level,
+                                      const SearchRestriction &restriction,
+                                      const QueryLevelPolicyT &query_level_policy,
+                                      ReverseLowerBoundWorkspace &workspace,
+                                      ReverseLowerBoundSearchStats &stats)
+{
+    (void)query_level_policy;
+
+    if (level < 1 || current_node >= workspace.from_clique_arc.size() ||
+        workspace.from_clique_arc[current_node])
+    {
+        return;
+    }
+
+    const auto &partition = facade.GetMultiLevelPartition();
+    const auto &cells = facade.GetCellStorage();
+    const auto cell_id = partition.GetCell(level, current_node);
+    const auto cell = cells.GetUnfilledCell(level, cell_id);
+
+    for (const auto predecessor : cell.GetSourceNodes())
+    {
+        ++stats.clique_candidates;
+        if (predecessor == current_node ||
+            !CheckParentCellRestriction(partition, level, predecessor, restriction))
+        {
+            continue;
+        }
+
+        const auto shortcut_min =
+            facade.GetTemporalShortcutMinDuration(level, cell_id, predecessor, current_node);
+        const auto candidate = temporal::detail::SafeDurationAdd(current_cost, shortcut_min);
+
+        if (candidate == INVALID_EDGE_DURATION)
+        {
+            continue;
+        }
+
+        if (workspace.lower_bounds[predecessor] == INVALID_EDGE_DURATION ||
+            candidate < workspace.lower_bounds[predecessor])
+        {
+            UpdateReverseLowerBound(workspace, stats, predecessor, candidate, true);
+        }
+    }
+}
+
+template <typename FacadeT>
+void RelaxReverseBorderPredecessors(const FacadeT &facade,
+                                    const NodeID current_node,
+                                    const EdgeDuration current_cost,
+                                    const LevelID level,
+                                    const SearchRestriction &restriction,
+                                    ReverseLowerBoundWorkspace &workspace,
+                                    ReverseLowerBoundSearchStats &stats)
+{
+    const auto &partition = facade.GetMultiLevelPartition();
+
+    ForEachDescendingLevel(
+        level,
+        [&](const LevelID edge_level)
+        {
+            for (const auto edge : facade.GetBorderEdgeRange(edge_level, current_node))
+            {
+                ++stats.border_edge_candidates;
+                if (!facade.IsBackwardEdge(edge))
+                {
+                    continue;
+                }
+
+                const auto predecessor = facade.GetTarget(edge);
+                if (facade.ExcludeNode(predecessor) ||
+                    !CheckParentCellRestriction(partition, edge_level, predecessor, restriction))
+                {
+                    continue;
+                }
+
+                const auto node_duration =
+                    temporal::detail::GetNodeLowerBoundDuration(facade, predecessor);
+                const auto turn_penalty = temporal::detail::TurnPenaltyToDuration(
+                    facade.GetDurationPenaltyForEdgeID(facade.GetEdgeData(edge).turn_id));
+                const auto edge_cost =
+                    temporal::detail::SafeDurationAdd(node_duration, turn_penalty);
+                const auto candidate =
+                    temporal::detail::SafeDurationAdd(current_cost, edge_cost);
+
+                if (candidate == INVALID_EDGE_DURATION)
+                {
+                    continue;
+                }
+
+                if (workspace.lower_bounds[predecessor] == INVALID_EDGE_DURATION ||
+                    candidate < workspace.lower_bounds[predecessor])
+                {
+                    UpdateReverseLowerBound(workspace, stats, predecessor, candidate, false);
+                }
+            }
+        });
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+void ReverseLowerBoundStep(const FacadeT &facade,
+                           const SearchRestriction &restriction,
+                           const QueryLevelPolicyT &query_level_policy,
+                           ReverseLowerBoundWorkspace &workspace,
+                           ReverseLowerBoundSearchStats &stats)
+{
+    const auto current = workspace.queue.top();
+    workspace.queue.pop();
+    ++stats.queue_pops;
+
+    if (current.node >= workspace.lower_bounds.size() ||
+        current.cost != workspace.lower_bounds[current.node])
+    {
+        return;
+    }
+
+    const auto level = query_level_policy.GetNodeQueryLevel(current.node, restriction);
+    RelaxReverseShortcutPredecessors(
+        facade, current.node, current.cost, level, restriction, query_level_policy, workspace, stats);
+    RelaxReverseBorderPredecessors(
+        facade, current.node, current.cost, level, restriction, workspace, stats);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &
+RunReverseLowerBoundSearch(const FacadeT &facade,
+                           const DirectedPhantomEndpoint &target,
+                           const SearchRestriction &restriction,
+                           const QueryLevelPolicyT &query_level_policy,
+                           ReverseLowerBoundWorkspace &workspace,
+                           ReverseLowerBoundSearchStats &stats)
+{
+    InitializeReverseLowerBounds(facade, target, workspace, stats);
+
+    while (!workspace.queue.empty())
+    {
+        ReverseLowerBoundStep(facade, restriction, query_level_policy, workspace, stats);
+    }
+
+    return workspace.lower_bounds;
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &
+RunReverseLowerBoundSearch(const FacadeT &facade,
+                           const std::vector<DirectedPhantomEndpoint> &targets,
+                           const SearchRestriction &restriction,
+                           const QueryLevelPolicyT &query_level_policy,
+                           ReverseLowerBoundWorkspace &workspace,
+                           ReverseLowerBoundSearchStats &stats)
+{
+    InitializeReverseLowerBoundsForTargets(facade, targets, workspace, stats);
+
+    while (!workspace.queue.empty())
+    {
+        ReverseLowerBoundStep(facade, restriction, query_level_policy, workspace, stats);
+    }
+
+    return workspace.lower_bounds;
+}
+
 template <typename FacadeT, typename QueryLevelPolicyT>
 std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
                                                     const DirectedPhantomEndpoint &target,
@@ -321,12 +697,54 @@ std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
                                                     const QueryLevelPolicyT &query_level_policy);
 
 template <typename FacadeT, typename QueryLevelPolicyT>
+std::vector<EdgeDuration>
+ComputeReverseLowerBoundsForTargets(const FacadeT &facade,
+                                    const std::vector<DirectedPhantomEndpoint> &targets,
+                                    const SearchRestriction &restriction,
+                                    const QueryLevelPolicyT &query_level_policy);
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &ComputeReverseLowerBounds(const FacadeT &facade,
+                                                           const DirectedPhantomEndpoint &target,
+                                                           const SearchRestriction &restriction,
+                                                           const QueryLevelPolicyT &query_level_policy,
+                                                           ReverseLowerBoundWorkspace &workspace,
+                                                           ReverseLowerBoundSearchStats *stats = nullptr);
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &
+ComputeReverseLowerBoundsForTargets(const FacadeT &facade,
+                                    const std::vector<DirectedPhantomEndpoint> &targets,
+                                    const SearchRestriction &restriction,
+                                    const QueryLevelPolicyT &query_level_policy,
+                                    ReverseLowerBoundWorkspace &workspace,
+                                    ReverseLowerBoundSearchStats *stats = nullptr);
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &ComputeReverseLowerBounds(const FacadeT &facade,
+                                                           const DirectedPhantomEndpoint &target,
+                                                           const SearchRestriction &restriction,
+                                                           const QueryLevelPolicyT &query_level_policy,
+                                                           ReverseLowerBoundCache &cache,
+                                                           ReverseLowerBoundSearchStats *stats = nullptr);
+
+template <typename FacadeT, typename QueryLevelPolicyT>
 TemporalOverlayPath SearchAtClock(const FacadeT &facade,
                                   const DirectedPhantomEndpoint &source,
                                   const DirectedPhantomEndpoint &target,
                                   const engine::temporal::TemporalClock departure_clock,
                                   const SearchRestriction &restriction,
-                                  const QueryLevelPolicyT &query_level_policy);
+                                  const QueryLevelPolicyT &query_level_policy,
+                                  const std::vector<EdgeDuration> &reverse_lower_bounds);
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath SearchAtClock(const FacadeT &facade,
+                                  const DirectedPhantomEndpoint &source,
+                                  const DirectedPhantomEndpoint &target,
+                                  const engine::temporal::TemporalClock departure_clock,
+                                  const SearchRestriction &restriction,
+                                  const QueryLevelPolicyT &query_level_policy,
+                                  ReverseLowerBoundCache *reverse_lower_bound_cache = nullptr);
 
 template <typename FacadeT, typename QueryLevelPolicyT>
 TemporalOverlayPath SearchImpl(const FacadeT &facade,
@@ -334,7 +752,17 @@ TemporalOverlayPath SearchImpl(const FacadeT &facade,
                                const DirectedPhantomEndpoint &target,
                                const std::time_t departure_timestamp,
                                const SearchRestriction &restriction,
-                               const QueryLevelPolicyT &query_level_policy);
+                               const QueryLevelPolicyT &query_level_policy,
+                               const std::vector<EdgeDuration> &reverse_lower_bounds);
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath SearchImpl(const FacadeT &facade,
+                               const DirectedPhantomEndpoint &source,
+                               const DirectedPhantomEndpoint &target,
+                               const std::time_t departure_timestamp,
+                               const SearchRestriction &restriction,
+                               const QueryLevelPolicyT &query_level_policy,
+                               ReverseLowerBoundCache *reverse_lower_bound_cache = nullptr);
 
 template <typename FacadeT>
 std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
@@ -355,114 +783,10 @@ std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
 {
     const auto timing_enabled = OverlayTimingEnabled();
     const auto reverse_search_start = std::chrono::steady_clock::now();
-    std::vector<EdgeDuration> lower_bounds(facade.GetNumberOfNodes(), INVALID_EDGE_DURATION);
-    std::vector<bool> from_clique_arc(facade.GetNumberOfNodes(), false);
-    std::priority_queue<QueueEntry, std::vector<QueueEntry>, QueueCompare> queue;
-    std::size_t queue_pops = 0;
-    std::size_t clique_candidates = 0;
-    std::size_t border_edge_candidates = 0;
-    std::size_t lower_bound_updates = 1;
-
-    const auto target_lower_bound = temporal::detail::GetPhantomTraversalLowerBound(facade, target);
-    lower_bounds[target.node] = target_lower_bound;
-    queue.push({target_lower_bound, target.node});
-
-    const auto &partition = facade.GetMultiLevelPartition();
-    const auto &cells = facade.GetCellStorage();
-
-    while (!queue.empty())
-    {
-        const auto current = queue.top();
-        queue.pop();
-        ++queue_pops;
-
-        if (current.cost != lower_bounds[current.node])
-        {
-            continue;
-        }
-
-        const auto level = query_level_policy.GetNodeQueryLevel(current.node, restriction);
-
-        if (level >= 1 && !from_clique_arc[current.node])
-        {
-            const auto cell_id = partition.GetCell(level, current.node);
-            const auto cell = cells.GetUnfilledCell(level, cell_id);
-
-            for (const auto predecessor : cell.GetSourceNodes())
-            {
-                ++clique_candidates;
-                if (predecessor == current.node ||
-                    !CheckParentCellRestriction(partition, level, predecessor, restriction))
-                {
-                    continue;
-                }
-
-                const auto shortcut_min =
-                    facade.GetTemporalShortcutMinDuration(level, cell_id, predecessor, current.node);
-                const auto candidate =
-                    temporal::detail::SafeDurationAdd(current.cost, shortcut_min);
-
-                if (candidate == INVALID_EDGE_DURATION)
-                {
-                    continue;
-                }
-
-                if (lower_bounds[predecessor] == INVALID_EDGE_DURATION ||
-                    candidate < lower_bounds[predecessor])
-                {
-                    lower_bounds[predecessor] = candidate;
-                    from_clique_arc[predecessor] = true;
-                    queue.push({candidate, predecessor});
-                    ++lower_bound_updates;
-                }
-            }
-        }
-
-        ForEachDescendingLevel(
-            level,
-            [&](const LevelID edge_level)
-            {
-                for (const auto edge : facade.GetBorderEdgeRange(edge_level, current.node))
-                {
-                    ++border_edge_candidates;
-                    if (!facade.IsBackwardEdge(edge))
-                    {
-                        continue;
-                    }
-
-                    const auto predecessor = facade.GetTarget(edge);
-                    if (facade.ExcludeNode(predecessor) ||
-                        !CheckParentCellRestriction(
-                            partition, edge_level, predecessor, restriction))
-                    {
-                        continue;
-                    }
-
-                    const auto node_duration =
-                        temporal::detail::GetNodeLowerBoundDuration(facade, predecessor);
-                    const auto turn_penalty = temporal::detail::TurnPenaltyToDuration(
-                        facade.GetDurationPenaltyForEdgeID(facade.GetEdgeData(edge).turn_id));
-                    const auto edge_cost =
-                        temporal::detail::SafeDurationAdd(node_duration, turn_penalty);
-                    const auto candidate =
-                        temporal::detail::SafeDurationAdd(current.cost, edge_cost);
-
-                    if (candidate == INVALID_EDGE_DURATION)
-                    {
-                        continue;
-                    }
-
-                    if (lower_bounds[predecessor] == INVALID_EDGE_DURATION ||
-                        candidate < lower_bounds[predecessor])
-                    {
-                        lower_bounds[predecessor] = candidate;
-                        from_clique_arc[predecessor] = false;
-                        queue.push({candidate, predecessor});
-                        ++lower_bound_updates;
-                    }
-                }
-            });
-    }
+    ReverseLowerBoundWorkspace workspace{facade.GetNumberOfNodes()};
+    ReverseLowerBoundSearchStats stats;
+    const auto &lower_bounds = ComputeReverseLowerBounds(
+        facade, target, restriction, query_level_policy, workspace, &stats);
 
     if (timing_enabled)
     {
@@ -474,13 +798,71 @@ std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
             << " target_node=" << target.node
             << " ms="
             << OverlayDurationMs(reverse_search_stop - reverse_search_start)
-            << " queue_pops=" << queue_pops
-            << " clique_candidates=" << clique_candidates
-            << " border_edge_candidates=" << border_edge_candidates
-            << " lower_bound_updates=" << lower_bound_updates;
+            << " queue_pops=" << stats.queue_pops
+            << " clique_candidates=" << stats.clique_candidates
+            << " border_edge_candidates=" << stats.border_edge_candidates
+            << " lower_bound_updates=" << stats.lower_bound_updates;
     }
 
     return lower_bounds;
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+std::vector<EdgeDuration>
+ComputeReverseLowerBoundsForTargets(const FacadeT &facade,
+                                    const std::vector<DirectedPhantomEndpoint> &targets,
+                                    const SearchRestriction &restriction,
+                                    const QueryLevelPolicyT &query_level_policy)
+{
+    ReverseLowerBoundWorkspace workspace{facade.GetNumberOfNodes()};
+    return ComputeReverseLowerBoundsForTargets(
+        facade, targets, restriction, query_level_policy, workspace);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &ComputeReverseLowerBounds(
+    const FacadeT &facade,
+    const DirectedPhantomEndpoint &target,
+    const SearchRestriction &restriction,
+    const QueryLevelPolicyT &query_level_policy,
+    ReverseLowerBoundWorkspace &workspace,
+    ReverseLowerBoundSearchStats *stats)
+{
+    ReverseLowerBoundSearchStats local_stats;
+    auto &active_stats = stats != nullptr ? *stats : local_stats;
+    active_stats = {};
+
+    return RunReverseLowerBoundSearch(
+        facade, target, restriction, query_level_policy, workspace, active_stats);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &
+ComputeReverseLowerBoundsForTargets(const FacadeT &facade,
+                                    const std::vector<DirectedPhantomEndpoint> &targets,
+                                    const SearchRestriction &restriction,
+                                    const QueryLevelPolicyT &query_level_policy,
+                                    ReverseLowerBoundWorkspace &workspace,
+                                    ReverseLowerBoundSearchStats *stats)
+{
+    ReverseLowerBoundSearchStats local_stats;
+    auto &active_stats = stats != nullptr ? *stats : local_stats;
+    active_stats = {};
+
+    return RunReverseLowerBoundSearch(
+        facade, targets, restriction, query_level_policy, workspace, active_stats);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &ComputeReverseLowerBounds(
+    const FacadeT &facade,
+    const DirectedPhantomEndpoint &target,
+    const SearchRestriction &restriction,
+    const QueryLevelPolicyT &query_level_policy,
+    ReverseLowerBoundCache &cache,
+    ReverseLowerBoundSearchStats *stats)
+{
+    return cache.GetOrCompute(facade, target, restriction, query_level_policy, stats);
 }
 
 template <typename FacadeT>
@@ -488,51 +870,37 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
                                   const DirectedPhantomEndpoint &source,
                                   const DirectedPhantomEndpoint &target,
                                   const engine::temporal::TemporalClock departure_clock,
-                                  const SearchRestriction &restriction)
+                                  const SearchRestriction &restriction,
+                                  ReverseLowerBoundCache *reverse_lower_bound_cache = nullptr)
 {
     const PairQueryLevelPolicy pair_query_level_policy{
         facade.GetMultiLevelPartition(), source, target};
     return SearchAtClock(
-        facade, source, target, departure_clock, restriction, pair_query_level_policy);
+        facade,
+        source,
+        target,
+        departure_clock,
+        restriction,
+        pair_query_level_policy,
+        reverse_lower_bound_cache);
 }
 
 template <typename FacadeT, typename QueryLevelPolicyT>
-TemporalOverlayPath SearchAtClock(const FacadeT &facade,
-                                  const DirectedPhantomEndpoint &source,
-                                  const DirectedPhantomEndpoint &target,
-                                  const engine::temporal::TemporalClock departure_clock,
-                                  const SearchRestriction &restriction,
-                                  const QueryLevelPolicyT &query_level_policy)
+TemporalOverlayPath SearchAtClockWithReverseLowerBounds(
+    const FacadeT &facade,
+    const DirectedPhantomEndpoint &source,
+    const DirectedPhantomEndpoint &target,
+    const engine::temporal::TemporalClock departure_clock,
+    const SearchRestriction &restriction,
+    const QueryLevelPolicyT &query_level_policy,
+    const std::vector<EdgeDuration> &reverse_lower_bounds,
+    const double reverse_search_ms,
+    const bool shared_reverse_bounds,
+    const std::chrono::steady_clock::time_point search_start)
 {
     const auto timing_enabled = OverlayTimingEnabled();
-    const auto search_start = std::chrono::steady_clock::now();
     TemporalOverlayPath best_path;
 
-    if (source.node == target.node)
-    {
-        best_path.total_duration =
-            temporal::detail::EvaluateLocalPathDuration(facade, source, target, departure_clock);
-        if (timing_enabled)
-        {
-            const auto search_stop = std::chrono::steady_clock::now();
-            util::Log(logDEBUG)
-                << "[overlay query] search restricted=" << restriction.restricted
-                << " level=" << static_cast<int>(restriction.level)
-                << " parent_cell=" << restriction.parent_cell
-                << " source_node=" << source.node
-                << " target_node=" << target.node
-                << " ms=" << OverlayDurationMs(search_stop - search_start)
-                << " reverse_ms=0 forward_ms=0 queue_pops=0 shortcut_candidates=0"
-                << " border_edge_candidates=0 best_updates=1 result=local";
-        }
-        return best_path;
-    }
-
-    const auto reverse_lower_bounds_start = std::chrono::steady_clock::now();
-    /*
-    const auto reverse_lower_bounds =
-        ComputeReverseLowerBounds(facade, target, restriction, query_level_policy);
-    const auto reverse_lower_bounds_stop = std::chrono::steady_clock::now();
     if (source.node >= reverse_lower_bounds.size() ||
         reverse_lower_bounds[source.node] == INVALID_EDGE_DURATION)
     {
@@ -546,15 +914,13 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
                 << " source_node=" << source.node
                 << " target_node=" << target.node
                 << " ms=" << OverlayDurationMs(search_stop - search_start)
-                << " reverse_ms="
-                << OverlayDurationMs(reverse_lower_bounds_stop - reverse_lower_bounds_start)
+                << " reverse_ms=" << reverse_search_ms
+                << " shared_reverse_bounds=" << shared_reverse_bounds
                 << " forward_ms=0 queue_pops=0 shortcut_candidates=0"
                 << " border_edge_candidates=0 best_updates=0 result=no_reverse_path";
         }
         return best_path;
     }
-    */
-    const auto reverse_lower_bounds_stop = reverse_lower_bounds_start;
 
     const auto &partition = facade.GetMultiLevelPartition();
     const auto &cells = facade.GetCellStorage();
@@ -585,7 +951,6 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
             continue;
         }
 
-        /*
         auto lower_bound = reverse_lower_bounds[current.node];
         if (lower_bound == INVALID_EDGE_DURATION)
         {
@@ -609,7 +974,6 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
         {
             continue;
         }
-        */
 
         if (current.node == target.node)
         {
@@ -749,8 +1113,8 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
             << " source_node=" << source.node
             << " target_node=" << target.node
             << " ms=" << OverlayDurationMs(search_stop - search_start)
-            << " reverse_ms="
-            << OverlayDurationMs(reverse_lower_bounds_stop - reverse_lower_bounds_start)
+            << " reverse_ms=" << reverse_search_ms
+            << " shared_reverse_bounds=" << shared_reverse_bounds
             << " forward_ms=" << OverlayDurationMs(forward_search_stop - forward_search_start)
             << " queue_pops=" << queue_pops
             << " shortcut_candidates=" << shortcut_candidates
@@ -776,12 +1140,132 @@ TemporalOverlayPath SearchImpl(const FacadeT &facade,
 }
 
 template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath SearchAtClock(const FacadeT &facade,
+                                  const DirectedPhantomEndpoint &source,
+                                  const DirectedPhantomEndpoint &target,
+                                  const engine::temporal::TemporalClock departure_clock,
+                                  const SearchRestriction &restriction,
+                                  const QueryLevelPolicyT &query_level_policy,
+                                  const std::vector<EdgeDuration> &reverse_lower_bounds)
+{
+    const auto timing_enabled = OverlayTimingEnabled();
+    const auto search_start = std::chrono::steady_clock::now();
+    TemporalOverlayPath best_path;
+
+    if (source.node == target.node)
+    {
+        best_path.total_duration =
+            temporal::detail::EvaluateLocalPathDuration(facade, source, target, departure_clock);
+        if (timing_enabled)
+        {
+            const auto search_stop = std::chrono::steady_clock::now();
+            util::Log(logDEBUG)
+                << "[overlay query] search restricted=" << restriction.restricted
+                << " level=" << static_cast<int>(restriction.level)
+                << " parent_cell=" << restriction.parent_cell
+                << " source_node=" << source.node
+                << " target_node=" << target.node
+                << " ms=" << OverlayDurationMs(search_stop - search_start)
+                << " reverse_ms=0 shared_reverse_bounds=0 forward_ms=0 queue_pops=0 shortcut_candidates=0"
+                << " border_edge_candidates=0 best_updates=1 result=local";
+        }
+        return best_path;
+    }
+
+    return SearchAtClockWithReverseLowerBounds(facade,
+                                               source,
+                                               target,
+                                               departure_clock,
+                                               restriction,
+                                               query_level_policy,
+                                               reverse_lower_bounds,
+                                               0.,
+                                               true,
+                                               search_start);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath SearchAtClock(const FacadeT &facade,
+                                  const DirectedPhantomEndpoint &source,
+                                  const DirectedPhantomEndpoint &target,
+                                  const engine::temporal::TemporalClock departure_clock,
+                                  const SearchRestriction &restriction,
+                                  const QueryLevelPolicyT &query_level_policy,
+                                  ReverseLowerBoundCache *reverse_lower_bound_cache)
+{
+    const auto timing_enabled = OverlayTimingEnabled();
+    const auto search_start = std::chrono::steady_clock::now();
+    TemporalOverlayPath best_path;
+
+    if (source.node == target.node)
+    {
+        best_path.total_duration =
+            temporal::detail::EvaluateLocalPathDuration(facade, source, target, departure_clock);
+        if (timing_enabled)
+        {
+            const auto search_stop = std::chrono::steady_clock::now();
+            util::Log(logDEBUG)
+                << "[overlay query] search restricted=" << restriction.restricted
+                << " level=" << static_cast<int>(restriction.level)
+                << " parent_cell=" << restriction.parent_cell
+                << " source_node=" << source.node
+                << " target_node=" << target.node
+                << " ms=" << OverlayDurationMs(search_stop - search_start)
+                << " reverse_ms=0 shared_reverse_bounds=0 forward_ms=0 queue_pops=0 shortcut_candidates=0"
+                << " border_edge_candidates=0 best_updates=1 result=local";
+        }
+        return best_path;
+    }
+
+    const auto reverse_lower_bounds_start = std::chrono::steady_clock::now();
+    ReverseLowerBoundWorkspace reverse_lower_bound_workspace;
+    const auto &reverse_lower_bounds =
+        restriction.restricted && reverse_lower_bound_cache != nullptr
+            ? ComputeReverseLowerBounds(
+                  facade, target, restriction, query_level_policy, *reverse_lower_bound_cache)
+            : ComputeReverseLowerBounds(
+                  facade, target, restriction, query_level_policy, reverse_lower_bound_workspace);
+    const auto reverse_lower_bounds_stop = std::chrono::steady_clock::now();
+
+    return SearchAtClockWithReverseLowerBounds(
+        facade,
+        source,
+        target,
+        departure_clock,
+        restriction,
+        query_level_policy,
+        reverse_lower_bounds,
+        OverlayDurationMs(reverse_lower_bounds_stop - reverse_lower_bounds_start),
+        false,
+        search_start);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
 TemporalOverlayPath SearchImpl(const FacadeT &facade,
                                const DirectedPhantomEndpoint &source,
                                const DirectedPhantomEndpoint &target,
                                const std::time_t departure_timestamp,
                                const SearchRestriction &restriction,
-                               const QueryLevelPolicyT &query_level_policy)
+                               const QueryLevelPolicyT &query_level_policy,
+                               const std::vector<EdgeDuration> &reverse_lower_bounds)
+{
+    return SearchAtClock(facade,
+                         source,
+                         target,
+                         engine::temporal::ToTemporalClock(departure_timestamp),
+                         restriction,
+                         query_level_policy,
+                         reverse_lower_bounds);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath SearchImpl(const FacadeT &facade,
+                               const DirectedPhantomEndpoint &source,
+                               const DirectedPhantomEndpoint &target,
+                               const std::time_t departure_timestamp,
+                               const SearchRestriction &restriction,
+                               const QueryLevelPolicyT &query_level_policy,
+                               ReverseLowerBoundCache *reverse_lower_bound_cache)
 {
     return SearchAtClock(
         facade,
@@ -789,7 +1273,8 @@ TemporalOverlayPath SearchImpl(const FacadeT &facade,
         target,
         engine::temporal::ToTemporalClock(departure_timestamp),
         restriction,
-        query_level_policy);
+        query_level_policy,
+        reverse_lower_bound_cache);
 }
 
 template <typename FacadeT>
@@ -798,7 +1283,9 @@ TemporalOverlayUnpackedPath UnpackPathImpl(const FacadeT &facade,
                                            const DirectedPhantomEndpoint &target,
                                            const engine::temporal::TemporalClock departure_clock,
                                            const TemporalOverlayPath &path,
-                                           const SearchRestriction &restriction)
+                                           const SearchRestriction &restriction,
+                                           ReverseLowerBoundCache *reverse_lower_bound_cache =
+                                               nullptr)
 {
     const auto timing_enabled = OverlayTimingEnabled();
     const auto unpack_start = std::chrono::steady_clock::now();
@@ -896,8 +1383,8 @@ TemporalOverlayUnpackedPath UnpackPathImpl(const FacadeT &facade,
         const DirectedPhantomEndpoint sub_target{&sub_target_phantom, to, false};
         const SearchRestriction sub_restriction{true, sublevel, parent_cell};
         const auto recursive_search_start = std::chrono::steady_clock::now();
-        const auto sub_path =
-            SearchAtClock(facade, sub_source, sub_target, current_clock, sub_restriction);
+        const auto sub_path = SearchAtClock(
+            facade, sub_source, sub_target, current_clock, sub_restriction, reverse_lower_bound_cache);
         recursive_search_duration += std::chrono::steady_clock::now() - recursive_search_start;
         if (!sub_path.is_valid())
         {
@@ -905,8 +1392,13 @@ TemporalOverlayUnpackedPath UnpackPathImpl(const FacadeT &facade,
         }
 
         const auto recursive_unpack_start = std::chrono::steady_clock::now();
-        const auto unpacked_subpath =
-            UnpackPathImpl(facade, sub_source, sub_target, current_clock, sub_path, sub_restriction);
+        const auto unpacked_subpath = UnpackPathImpl(facade,
+                                                     sub_source,
+                                                     sub_target,
+                                                     current_clock,
+                                                     sub_path,
+                                                     sub_restriction,
+                                                     reverse_lower_bound_cache);
         recursive_unpack_duration += std::chrono::steady_clock::now() - recursive_unpack_start;
         if (!unpacked_subpath.is_valid())
         {
@@ -987,6 +1479,23 @@ TemporalOverlayPath Search(const FacadeT &facade,
                               query_level_policy);
 }
 
+template <typename FacadeT, typename QueryLevelPolicyT>
+TemporalOverlayPath Search(const FacadeT &facade,
+                           const DirectedPhantomEndpoint &source,
+                           const DirectedPhantomEndpoint &target,
+                           const std::time_t departure_timestamp,
+                           const QueryLevelPolicyT &query_level_policy,
+                           const std::vector<EdgeDuration> &reverse_lower_bounds)
+{
+    return detail::SearchImpl(facade,
+                              source,
+                              target,
+                              departure_timestamp,
+                              detail::SearchRestriction{},
+                              query_level_policy,
+                              reverse_lower_bounds);
+}
+
 template <typename FacadeT>
 TemporalOverlayPath Search(const FacadeT &facade,
                            const DirectedPhantomEndpoint &source,
@@ -1015,6 +1524,23 @@ TemporalOverlayUnpackedPath UnpackPath(const FacadeT &facade,
                                   engine::temporal::ToTemporalClock(departure_timestamp),
                                   path,
                                   detail::SearchRestriction{});
+}
+
+template <typename FacadeT>
+TemporalOverlayUnpackedPath UnpackPath(const FacadeT &facade,
+                                       const DirectedPhantomEndpoint &source,
+                                       const DirectedPhantomEndpoint &target,
+                                       const std::time_t departure_timestamp,
+                                       const TemporalOverlayPath &path,
+                                       detail::ReverseLowerBoundCache &reverse_lower_bound_cache)
+{
+    return detail::UnpackPathImpl(facade,
+                                  source,
+                                  target,
+                                  engine::temporal::ToTemporalClock(departure_timestamp),
+                                  path,
+                                  detail::SearchRestriction{},
+                                  &reverse_lower_bound_cache);
 }
 
 } // namespace osrm::engine::routing_algorithms::mld::temporal::overlay

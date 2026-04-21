@@ -201,7 +201,7 @@ InternalRouteResult temporalOverlayDirectShortestPathSearch(
                 << " endpoint_ms="
                 << mld::temporal::overlay::detail::OverlayDurationMs(
                        endpoint_enumeration_stop - endpoint_enumeration_start)
-                << " shared_corridor_ms=0 pair_search_ms=0 unpack_ms=0"
+                << " shared_corridor_ms=0 shared_reverse_ms=0 pair_search_ms=0 unpack_ms=0"
                 << " source_endpoints=" << source_endpoints.size()
                 << " target_endpoints=" << target_endpoints.size()
                 << " candidate_pairs=0 valid_pairs=0 best_updates=0 result=empty_endpoints";
@@ -214,6 +214,33 @@ InternalRouteResult temporalOverlayDirectShortestPathSearch(
         mld::temporal::overlay::detail::MakeSharedEndpointQueryLevelPolicy(
             facade, source_endpoints, target_endpoints);
     const auto shared_corridor_stop = std::chrono::steady_clock::now();
+    const auto shared_reverse_lower_bounds_start = std::chrono::steady_clock::now();
+    mld::temporal::overlay::detail::ReverseLowerBoundWorkspace shared_reverse_lower_bound_workspace{
+        facade.GetNumberOfNodes()};
+    mld::temporal::overlay::detail::ReverseLowerBoundSearchStats shared_reverse_lower_bound_stats;
+    const auto &shared_reverse_lower_bounds =
+        mld::temporal::overlay::detail::ComputeReverseLowerBoundsForTargets(
+            facade,
+            target_endpoints,
+            {},
+            shared_query_level_policy,
+            shared_reverse_lower_bound_workspace,
+            &shared_reverse_lower_bound_stats);
+    const auto shared_reverse_lower_bounds_stop = std::chrono::steady_clock::now();
+
+    if (overlay_timing_enabled)
+    {
+        util::Log(logDEBUG)
+            << "[overlay query] shared_reverse_lower_bounds ms="
+            << mld::temporal::overlay::detail::OverlayDurationMs(
+                   shared_reverse_lower_bounds_stop - shared_reverse_lower_bounds_start)
+            << " target_endpoints=" << target_endpoints.size()
+            << " queue_pops=" << shared_reverse_lower_bound_stats.queue_pops
+            << " clique_candidates=" << shared_reverse_lower_bound_stats.clique_candidates
+            << " border_edge_candidates="
+            << shared_reverse_lower_bound_stats.border_edge_candidates
+            << " lower_bound_updates=" << shared_reverse_lower_bound_stats.lower_bound_updates;
+    }
 
     mld::temporal::overlay::TemporalOverlayPath best_path;
     const mld::temporal::DirectedPhantomEndpoint *best_source = nullptr;
@@ -230,7 +257,12 @@ InternalRouteResult temporalOverlayDirectShortestPathSearch(
             ++candidate_pairs;
             const auto pair_search_start = std::chrono::steady_clock::now();
             const auto candidate = mld::temporal::overlay::Search(
-                facade, source, target, departure_timestamp, shared_query_level_policy);
+                facade,
+                source,
+                target,
+                departure_timestamp,
+                shared_query_level_policy,
+                shared_reverse_lower_bounds);
             const auto pair_search_stop = std::chrono::steady_clock::now();
             pair_search_duration += pair_search_stop - pair_search_start;
 
@@ -280,6 +312,9 @@ InternalRouteResult temporalOverlayDirectShortestPathSearch(
                 << " shared_corridor_ms="
                 << mld::temporal::overlay::detail::OverlayDurationMs(
                        shared_corridor_stop - shared_corridor_start)
+                << " shared_reverse_ms="
+                << mld::temporal::overlay::detail::OverlayDurationMs(
+                       shared_reverse_lower_bounds_stop - shared_reverse_lower_bounds_start)
                 << " pair_search_ms="
                 << mld::temporal::overlay::detail::OverlayDurationMs(pair_search_duration)
                 << " unpack_ms=0"
@@ -311,6 +346,9 @@ InternalRouteResult temporalOverlayDirectShortestPathSearch(
                 << " shared_corridor_ms="
                 << mld::temporal::overlay::detail::OverlayDurationMs(
                        shared_corridor_stop - shared_corridor_start)
+                << " shared_reverse_ms="
+                << mld::temporal::overlay::detail::OverlayDurationMs(
+                       shared_reverse_lower_bounds_stop - shared_reverse_lower_bounds_start)
                 << " pair_search_ms="
                 << mld::temporal::overlay::detail::OverlayDurationMs(pair_search_duration)
                 << " unpack_ms="
@@ -337,6 +375,9 @@ InternalRouteResult temporalOverlayDirectShortestPathSearch(
             << " shared_corridor_ms="
             << mld::temporal::overlay::detail::OverlayDurationMs(
                    shared_corridor_stop - shared_corridor_start)
+            << " shared_reverse_ms="
+            << mld::temporal::overlay::detail::OverlayDurationMs(
+                   shared_reverse_lower_bounds_stop - shared_reverse_lower_bounds_start)
             << " pair_search_ms="
             << mld::temporal::overlay::detail::OverlayDurationMs(pair_search_duration)
             << " unpack_ms="

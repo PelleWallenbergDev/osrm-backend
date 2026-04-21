@@ -1017,6 +1017,383 @@ BOOST_AUTO_TEST_CASE(restricted_level_one_search_uses_temporal_shortcut)
     BOOST_CHECK_EQUAL(path.packed_path.front().overlay_level, LevelID{1});
 }
 
+BOOST_AUTO_TEST_CASE(reverse_lower_bound_workspace_reuse_matches_public_results)
+{
+    MockFacade facade;
+
+    const auto source_phantom = MakeZeroTraversalPhantom(0);
+    const auto target_phantom = MakeZeroTraversalPhantom(3);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 3, false};
+
+    const auto unrestricted_reference =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, source, target, {});
+    const auto restricted_reference =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade,
+            source,
+            target,
+            {true, LevelID{1}, CellID{0}});
+
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundWorkspace
+        workspace{facade.GetNumberOfNodes()};
+    const engine::routing_algorithms::mld::temporal::overlay::detail::PairQueryLevelPolicy
+        query_level_policy{facade.GetMultiLevelPartition(), source, target};
+
+    const auto &unrestricted_workspace_result =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target, {}, query_level_policy, workspace);
+    std::vector<EdgeDuration> unrestricted_copy(unrestricted_workspace_result.begin(),
+                                                unrestricted_workspace_result.end());
+
+    const auto &restricted_workspace_result =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade,
+            target,
+            {true, LevelID{1}, CellID{0}},
+            query_level_policy,
+            workspace);
+    std::vector<EdgeDuration> restricted_copy(restricted_workspace_result.begin(),
+                                              restricted_workspace_result.end());
+
+    BOOST_CHECK_EQUAL_COLLECTIONS(unrestricted_copy.begin(),
+                                  unrestricted_copy.end(),
+                                  unrestricted_reference.begin(),
+                                  unrestricted_reference.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(restricted_copy.begin(),
+                                  restricted_copy.end(),
+                                  restricted_reference.begin(),
+                                  restricted_reference.end());
+}
+
+BOOST_AUTO_TEST_CASE(reverse_lower_bound_target_set_initialization_keeps_minimum_seed_per_node)
+{
+    MockFacade facade;
+
+    auto target_high_phantom = MakeZeroTraversalPhantom(3);
+    target_high_phantom.forward_duration = EdgeDuration{5};
+    const auto target_low_phantom = MakeZeroTraversalPhantom(3);
+    auto target_other_phantom = MakeZeroTraversalPhantom(2);
+    target_other_phantom.forward_duration = EdgeDuration{5};
+
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint> targets{
+        {&target_high_phantom, 3, false},
+        {&target_low_phantom, 3, false},
+        {&target_other_phantom, 2, false}};
+
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundWorkspace
+        workspace{facade.GetNumberOfNodes()};
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundSearchStats stats;
+
+    engine::routing_algorithms::mld::temporal::overlay::detail::InitializeReverseLowerBoundsForTargets(
+        facade, targets, workspace, stats);
+
+    BOOST_CHECK_EQUAL(stats.lower_bound_updates, 3U);
+    BOOST_CHECK_EQUAL(workspace.touched_nodes.size(), 2U);
+    BOOST_CHECK_EQUAL(workspace.queue.size(), 3U);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(workspace.lower_bounds[3]), 0);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(workspace.lower_bounds[2]), 5);
+    BOOST_CHECK_EQUAL(workspace.from_clique_arc[3], false);
+    BOOST_CHECK_EQUAL(workspace.from_clique_arc[2], false);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(workspace.lower_bounds[0]),
+                      from_alias<std::int32_t>(INVALID_EDGE_DURATION));
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(workspace.lower_bounds[1]),
+                      from_alias<std::int32_t>(INVALID_EDGE_DURATION));
+}
+
+BOOST_AUTO_TEST_CASE(reverse_lower_bound_target_set_matches_pointwise_minimum_of_per_target_results)
+{
+    MockFacade facade;
+
+    const auto source_zero_phantom = MakeZeroTraversalPhantom(0);
+    const auto source_one_phantom = MakeZeroTraversalPhantom(1);
+    const auto target_two_phantom = MakeZeroTraversalPhantom(2);
+    const auto target_three_phantom = MakeZeroTraversalPhantom(3);
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        source_endpoints{{&source_zero_phantom, 0, false}, {&source_one_phantom, 1, false}};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        target_endpoints{{&target_two_phantom, 2, false}, {&target_three_phantom, 3, false}};
+    const auto shared_query_level_policy =
+        engine::routing_algorithms::mld::temporal::overlay::detail::MakeSharedEndpointQueryLevelPolicy(
+            facade, source_endpoints, target_endpoints);
+
+    const auto lower_bounds_to_two =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target_endpoints[0], {}, shared_query_level_policy);
+    const auto lower_bounds_to_three =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target_endpoints[1], {}, shared_query_level_policy);
+    const auto shared_lower_bounds =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBoundsForTargets(
+            facade, target_endpoints, {}, shared_query_level_policy);
+
+    BOOST_REQUIRE_EQUAL(shared_lower_bounds.size(), lower_bounds_to_two.size());
+    BOOST_REQUIRE_EQUAL(shared_lower_bounds.size(), lower_bounds_to_three.size());
+
+    const auto pointwise_minimum = [](const EdgeDuration lhs, const EdgeDuration rhs)
+    {
+        if (lhs == INVALID_EDGE_DURATION)
+        {
+            return rhs;
+        }
+        if (rhs == INVALID_EDGE_DURATION)
+        {
+            return lhs;
+        }
+        return std::min(lhs, rhs);
+    };
+
+    for (std::size_t index = 0; index < shared_lower_bounds.size(); ++index)
+    {
+        BOOST_CHECK_EQUAL(shared_lower_bounds[index],
+                          pointwise_minimum(lower_bounds_to_two[index],
+                                            lower_bounds_to_three[index]));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(precomputed_target_set_reverse_lower_bounds_search_matches_exact_target_search)
+{
+    MockFacade facade;
+
+    const auto source_zero_phantom = MakeZeroTraversalPhantom(0);
+    const auto source_one_phantom = MakeZeroTraversalPhantom(1);
+    const auto target_two_phantom = MakeZeroTraversalPhantom(2);
+    const auto target_three_phantom = MakeZeroTraversalPhantom(3);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_zero_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_three_phantom, 3, false};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        source_endpoints{source, {&source_one_phantom, 1, false}};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        target_endpoints{{&target_two_phantom, 2, false}, target};
+    const auto shared_query_level_policy =
+        engine::routing_algorithms::mld::temporal::overlay::detail::MakeSharedEndpointQueryLevelPolicy(
+            facade, source_endpoints, target_endpoints);
+    const auto shared_reverse_lower_bounds =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBoundsForTargets(
+            facade, target_endpoints, {}, shared_query_level_policy);
+
+    const auto exact_target_path = engine::routing_algorithms::mld::temporal::overlay::Search(
+        facade, source, target, mondayMidnightUtc(), shared_query_level_policy);
+    const auto precomputed_path = engine::routing_algorithms::mld::temporal::overlay::Search(
+        facade,
+        source,
+        target,
+        mondayMidnightUtc(),
+        shared_query_level_policy,
+        shared_reverse_lower_bounds);
+
+    BOOST_REQUIRE(exact_target_path.is_valid());
+    BOOST_REQUIRE(precomputed_path.is_valid());
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(precomputed_path.total_duration),
+                      from_alias<std::int32_t>(exact_target_path.total_duration));
+    BOOST_REQUIRE_EQUAL(precomputed_path.packed_path.size(), exact_target_path.packed_path.size());
+
+    for (std::size_t i = 0; i < exact_target_path.packed_path.size(); ++i)
+    {
+        BOOST_CHECK_EQUAL(precomputed_path.packed_path[i].from, exact_target_path.packed_path[i].from);
+        BOOST_CHECK_EQUAL(precomputed_path.packed_path[i].to, exact_target_path.packed_path[i].to);
+        BOOST_CHECK_EQUAL(precomputed_path.packed_path[i].is_overlay,
+                          exact_target_path.packed_path[i].is_overlay);
+        BOOST_CHECK_EQUAL(precomputed_path.packed_path[i].overlay_level,
+                          exact_target_path.packed_path[i].overlay_level);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(shared_target_set_top_level_pair_loop_matches_exact_target_pair_loop)
+{
+    MockFacade facade;
+
+    const auto source_zero_phantom = MakeZeroTraversalPhantom(0);
+    const auto source_one_phantom = MakeZeroTraversalPhantom(1);
+    const auto target_two_phantom = MakeZeroTraversalPhantom(2);
+    const auto target_three_phantom = MakeZeroTraversalPhantom(3);
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        source_endpoints{{&source_zero_phantom, 0, false}, {&source_one_phantom, 1, false}};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        target_endpoints{{&target_two_phantom, 2, false}, {&target_three_phantom, 3, false}};
+    const auto shared_query_level_policy =
+        engine::routing_algorithms::mld::temporal::overlay::detail::MakeSharedEndpointQueryLevelPolicy(
+            facade, source_endpoints, target_endpoints);
+    const auto shared_reverse_lower_bounds =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBoundsForTargets(
+            facade, target_endpoints, {}, shared_query_level_policy);
+
+    engine::routing_algorithms::mld::temporal::overlay::TemporalOverlayPath exact_target_best_path;
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint *exact_target_best_source =
+        nullptr;
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint *exact_target_best_target =
+        nullptr;
+    for (const auto &source : source_endpoints)
+    {
+        for (const auto &target : target_endpoints)
+        {
+            const auto candidate = engine::routing_algorithms::mld::temporal::overlay::Search(
+                facade, source, target, mondayMidnightUtc(), shared_query_level_policy);
+            if (!candidate.is_valid() ||
+                (exact_target_best_path.is_valid() &&
+                 candidate.total_duration >= exact_target_best_path.total_duration))
+            {
+                continue;
+            }
+
+            exact_target_best_path = candidate;
+            exact_target_best_source = &source;
+            exact_target_best_target = &target;
+        }
+    }
+
+    engine::routing_algorithms::mld::temporal::overlay::TemporalOverlayPath
+        shared_target_set_best_path;
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint
+        *shared_target_set_best_source = nullptr;
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint
+        *shared_target_set_best_target = nullptr;
+    for (const auto &source : source_endpoints)
+    {
+        for (const auto &target : target_endpoints)
+        {
+            const auto candidate = engine::routing_algorithms::mld::temporal::overlay::Search(
+                facade,
+                source,
+                target,
+                mondayMidnightUtc(),
+                shared_query_level_policy,
+                shared_reverse_lower_bounds);
+            if (!candidate.is_valid() ||
+                (shared_target_set_best_path.is_valid() &&
+                 candidate.total_duration >= shared_target_set_best_path.total_duration))
+            {
+                continue;
+            }
+
+            shared_target_set_best_path = candidate;
+            shared_target_set_best_source = &source;
+            shared_target_set_best_target = &target;
+        }
+    }
+
+    BOOST_REQUIRE(exact_target_best_path.is_valid());
+    BOOST_REQUIRE(shared_target_set_best_path.is_valid());
+    BOOST_REQUIRE(exact_target_best_source != nullptr);
+    BOOST_REQUIRE(exact_target_best_target != nullptr);
+    BOOST_REQUIRE(shared_target_set_best_source != nullptr);
+    BOOST_REQUIRE(shared_target_set_best_target != nullptr);
+
+    const auto exact_target_unpacked = engine::routing_algorithms::mld::temporal::overlay::UnpackPath(
+        facade,
+        *exact_target_best_source,
+        *exact_target_best_target,
+        mondayMidnightUtc(),
+        exact_target_best_path);
+    const auto shared_target_set_unpacked =
+        engine::routing_algorithms::mld::temporal::overlay::UnpackPath(
+            facade,
+            *shared_target_set_best_source,
+            *shared_target_set_best_target,
+            mondayMidnightUtc(),
+            shared_target_set_best_path);
+
+    BOOST_REQUIRE(exact_target_unpacked.is_valid());
+    BOOST_REQUIRE(shared_target_set_unpacked.is_valid());
+    BOOST_CHECK_EQUAL(shared_target_set_best_source->node, exact_target_best_source->node);
+    BOOST_CHECK_EQUAL(shared_target_set_best_target->node, exact_target_best_target->node);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(shared_target_set_best_path.total_duration),
+                      from_alias<std::int32_t>(exact_target_best_path.total_duration));
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(shared_target_set_unpacked.total_duration),
+                      from_alias<std::int32_t>(exact_target_unpacked.total_duration));
+    BOOST_REQUIRE_EQUAL(shared_target_set_best_path.packed_path.size(),
+                        exact_target_best_path.packed_path.size());
+    for (std::size_t i = 0; i < exact_target_best_path.packed_path.size(); ++i)
+    {
+        BOOST_CHECK_EQUAL(shared_target_set_best_path.packed_path[i].from,
+                          exact_target_best_path.packed_path[i].from);
+        BOOST_CHECK_EQUAL(shared_target_set_best_path.packed_path[i].to,
+                          exact_target_best_path.packed_path[i].to);
+        BOOST_CHECK_EQUAL(shared_target_set_best_path.packed_path[i].is_overlay,
+                          exact_target_best_path.packed_path[i].is_overlay);
+        BOOST_CHECK_EQUAL(shared_target_set_best_path.packed_path[i].overlay_level,
+                          exact_target_best_path.packed_path[i].overlay_level);
+    }
+    BOOST_CHECK_EQUAL_COLLECTIONS(shared_target_set_unpacked.nodes.begin(),
+                                  shared_target_set_unpacked.nodes.end(),
+                                  exact_target_unpacked.nodes.begin(),
+                                  exact_target_unpacked.nodes.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(shared_target_set_unpacked.edges.begin(),
+                                  shared_target_set_unpacked.edges.end(),
+                                  exact_target_unpacked.edges.begin(),
+                                  exact_target_unpacked.edges.end());
+}
+
+BOOST_AUTO_TEST_CASE(reverse_lower_bound_cache_reuses_identical_restricted_requests)
+{
+    MockFacade facade;
+
+    const auto source_phantom = MakeZeroTraversalPhantom(0);
+    const auto target_phantom = MakeZeroTraversalPhantom(3);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 3, false};
+    const engine::routing_algorithms::mld::temporal::overlay::detail::PairQueryLevelPolicy
+        query_level_policy{facade.GetMultiLevelPartition(), source, target};
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundCache cache{
+        facade.GetNumberOfNodes()};
+    const auto restriction =
+        engine::routing_algorithms::mld::temporal::overlay::detail::SearchRestriction{
+            true, LevelID{1}, CellID{0}};
+
+    const auto &first =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target, restriction, query_level_policy, cache);
+    const auto &second =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target, restriction, query_level_policy, cache);
+
+    BOOST_CHECK_EQUAL(cache.GetMissCount(), 1U);
+    BOOST_CHECK_EQUAL(cache.GetHitCount(), 1U);
+    BOOST_CHECK_EQUAL(cache.GetEntryCount(), 1U);
+    BOOST_CHECK_EQUAL_COLLECTIONS(first.begin(), first.end(), second.begin(), second.end());
+}
+
+BOOST_AUTO_TEST_CASE(reverse_lower_bound_cache_keeps_restricted_requests_separate)
+{
+    MockFacade facade;
+
+    const auto source_phantom = MakeZeroTraversalPhantom(0);
+    const auto target_phantom = MakeZeroTraversalPhantom(3);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 3, false};
+    const engine::routing_algorithms::mld::temporal::overlay::detail::PairQueryLevelPolicy
+        query_level_policy{facade.GetMultiLevelPartition(), source, target};
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundCache cache{
+        facade.GetNumberOfNodes()};
+    const auto level_one_restriction =
+        engine::routing_algorithms::mld::temporal::overlay::detail::SearchRestriction{
+            true, LevelID{1}, CellID{0}};
+    const auto level_zero_restriction =
+        engine::routing_algorithms::mld::temporal::overlay::detail::SearchRestriction{
+            true, LevelID{0}, CellID{0}};
+
+    const auto &level_one =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target, level_one_restriction, query_level_policy, cache);
+    const auto &level_zero =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target, level_zero_restriction, query_level_policy, cache);
+
+    BOOST_CHECK_EQUAL(cache.GetMissCount(), 2U);
+    BOOST_CHECK_EQUAL(cache.GetHitCount(), 0U);
+    BOOST_CHECK_EQUAL(cache.GetEntryCount(), 2U);
+    BOOST_CHECK_EQUAL(level_one.size(), level_zero.size());
+}
+
 BOOST_AUTO_TEST_CASE(recursive_unpacking_expands_overlay_edge_to_base_path)
 {
     MockFacade facade;
@@ -1042,6 +1419,59 @@ BOOST_AUTO_TEST_CASE(recursive_unpacking_expands_overlay_edge_to_base_path)
                                   expected_nodes.begin(),
                                   expected_nodes.end());
     BOOST_CHECK_EQUAL(unpacked.edges.size(), 3U);
+}
+
+BOOST_AUTO_TEST_CASE(cached_overlay_unpack_matches_uncached_unpack_and_reuses_restricted_reverse_bounds)
+{
+    MockFacade facade;
+
+    const auto source_phantom = MakeZeroTraversalPhantom(0);
+    const auto target_phantom = MakeZeroTraversalPhantom(3);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 3, false};
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundCache cache{
+        facade.GetNumberOfNodes()};
+
+    const auto path = engine::routing_algorithms::mld::temporal::overlay::Search(
+        facade, source, target, mondayMidnightUtc());
+    const auto uncached_unpacked = engine::routing_algorithms::mld::temporal::overlay::UnpackPath(
+        facade, source, target, mondayMidnightUtc(), path);
+    const auto cached_unpacked_first =
+        engine::routing_algorithms::mld::temporal::overlay::UnpackPath(
+            facade, source, target, mondayMidnightUtc(), path, cache);
+    const auto cached_unpacked_second =
+        engine::routing_algorithms::mld::temporal::overlay::UnpackPath(
+            facade, source, target, mondayMidnightUtc(), path, cache);
+
+    BOOST_REQUIRE(path.is_valid());
+    BOOST_REQUIRE(uncached_unpacked.is_valid());
+    BOOST_REQUIRE(cached_unpacked_first.is_valid());
+    BOOST_REQUIRE(cached_unpacked_second.is_valid());
+    BOOST_CHECK_EQUAL(cache.GetMissCount(), 1U);
+    BOOST_CHECK_EQUAL(cache.GetHitCount(), 1U);
+    BOOST_CHECK_EQUAL(cache.GetEntryCount(), 1U);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(cached_unpacked_first.total_duration),
+                      from_alias<std::int32_t>(uncached_unpacked.total_duration));
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(cached_unpacked_second.total_duration),
+                      from_alias<std::int32_t>(uncached_unpacked.total_duration));
+    BOOST_CHECK_EQUAL_COLLECTIONS(cached_unpacked_first.nodes.begin(),
+                                  cached_unpacked_first.nodes.end(),
+                                  uncached_unpacked.nodes.begin(),
+                                  uncached_unpacked.nodes.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(cached_unpacked_second.nodes.begin(),
+                                  cached_unpacked_second.nodes.end(),
+                                  uncached_unpacked.nodes.begin(),
+                                  uncached_unpacked.nodes.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(cached_unpacked_first.edges.begin(),
+                                  cached_unpacked_first.edges.end(),
+                                  uncached_unpacked.edges.begin(),
+                                  uncached_unpacked.edges.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(cached_unpacked_second.edges.begin(),
+                                  cached_unpacked_second.edges.end(),
+                                  uncached_unpacked.edges.begin(),
+                                  uncached_unpacked.edges.end());
 }
 
 BOOST_AUTO_TEST_CASE(overlay_query_uses_bucketed_shortcut_duration)
