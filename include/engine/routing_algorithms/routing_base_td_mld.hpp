@@ -7,9 +7,11 @@
 #include "engine/routing_algorithms/temporal_asymmetric_mld.hpp"
 #include "engine/temporal_traffic.hpp"
 
+#include "util/log.hpp"
 #include "util/typedefs.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <optional>
@@ -49,6 +51,18 @@ struct TemporalOverlayUnpackedPath
 
 namespace detail
 {
+inline bool OverlayTimingEnabled()
+{
+    const auto &policy = util::LogPolicy::GetInstance();
+    return !policy.IsMute() && policy.GetLevel() >= logDEBUG;
+}
+
+inline double OverlayDurationMs(const std::chrono::steady_clock::duration duration)
+{
+    return 0.000001 *
+           std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+}
+
 struct SearchRestriction
 {
     bool restricted = false;
@@ -339,9 +353,15 @@ std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
                                                     const SearchRestriction &restriction,
                                                     const QueryLevelPolicyT &query_level_policy)
 {
+    const auto timing_enabled = OverlayTimingEnabled();
+    const auto reverse_search_start = std::chrono::steady_clock::now();
     std::vector<EdgeDuration> lower_bounds(facade.GetNumberOfNodes(), INVALID_EDGE_DURATION);
     std::vector<bool> from_clique_arc(facade.GetNumberOfNodes(), false);
     std::priority_queue<QueueEntry, std::vector<QueueEntry>, QueueCompare> queue;
+    std::size_t queue_pops = 0;
+    std::size_t clique_candidates = 0;
+    std::size_t border_edge_candidates = 0;
+    std::size_t lower_bound_updates = 1;
 
     const auto target_lower_bound = temporal::detail::GetPhantomTraversalLowerBound(facade, target);
     lower_bounds[target.node] = target_lower_bound;
@@ -354,6 +374,7 @@ std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
     {
         const auto current = queue.top();
         queue.pop();
+        ++queue_pops;
 
         if (current.cost != lower_bounds[current.node])
         {
@@ -369,6 +390,7 @@ std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
 
             for (const auto predecessor : cell.GetSourceNodes())
             {
+                ++clique_candidates;
                 if (predecessor == current.node ||
                     !CheckParentCellRestriction(partition, level, predecessor, restriction))
                 {
@@ -391,6 +413,7 @@ std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
                     lower_bounds[predecessor] = candidate;
                     from_clique_arc[predecessor] = true;
                     queue.push({candidate, predecessor});
+                    ++lower_bound_updates;
                 }
             }
         }
@@ -401,6 +424,7 @@ std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
             {
                 for (const auto edge : facade.GetBorderEdgeRange(edge_level, current.node))
                 {
+                    ++border_edge_candidates;
                     if (!facade.IsBackwardEdge(edge))
                     {
                         continue;
@@ -434,9 +458,26 @@ std::vector<EdgeDuration> ComputeReverseLowerBounds(const FacadeT &facade,
                         lower_bounds[predecessor] = candidate;
                         from_clique_arc[predecessor] = false;
                         queue.push({candidate, predecessor});
+                        ++lower_bound_updates;
                     }
                 }
             });
+    }
+
+    if (timing_enabled)
+    {
+        const auto reverse_search_stop = std::chrono::steady_clock::now();
+        util::Log(logDEBUG)
+            << "[overlay query] reverse_lower_bounds restricted=" << restriction.restricted
+            << " level=" << static_cast<int>(restriction.level)
+            << " parent_cell=" << restriction.parent_cell
+            << " target_node=" << target.node
+            << " ms="
+            << OverlayDurationMs(reverse_search_stop - reverse_search_start)
+            << " queue_pops=" << queue_pops
+            << " clique_candidates=" << clique_candidates
+            << " border_edge_candidates=" << border_edge_candidates
+            << " lower_bound_updates=" << lower_bound_updates;
     }
 
     return lower_bounds;
@@ -463,22 +504,57 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
                                   const SearchRestriction &restriction,
                                   const QueryLevelPolicyT &query_level_policy)
 {
+    const auto timing_enabled = OverlayTimingEnabled();
+    const auto search_start = std::chrono::steady_clock::now();
     TemporalOverlayPath best_path;
 
     if (source.node == target.node)
     {
         best_path.total_duration =
             temporal::detail::EvaluateLocalPathDuration(facade, source, target, departure_clock);
+        if (timing_enabled)
+        {
+            const auto search_stop = std::chrono::steady_clock::now();
+            util::Log(logDEBUG)
+                << "[overlay query] search restricted=" << restriction.restricted
+                << " level=" << static_cast<int>(restriction.level)
+                << " parent_cell=" << restriction.parent_cell
+                << " source_node=" << source.node
+                << " target_node=" << target.node
+                << " ms=" << OverlayDurationMs(search_stop - search_start)
+                << " reverse_ms=0 forward_ms=0 queue_pops=0 shortcut_candidates=0"
+                << " border_edge_candidates=0 best_updates=1 result=local";
+        }
         return best_path;
     }
 
+    const auto reverse_lower_bounds_start = std::chrono::steady_clock::now();
+    /*
     const auto reverse_lower_bounds =
         ComputeReverseLowerBounds(facade, target, restriction, query_level_policy);
+    const auto reverse_lower_bounds_stop = std::chrono::steady_clock::now();
     if (source.node >= reverse_lower_bounds.size() ||
         reverse_lower_bounds[source.node] == INVALID_EDGE_DURATION)
     {
+        if (timing_enabled)
+        {
+            const auto search_stop = std::chrono::steady_clock::now();
+            util::Log(logDEBUG)
+                << "[overlay query] search restricted=" << restriction.restricted
+                << " level=" << static_cast<int>(restriction.level)
+                << " parent_cell=" << restriction.parent_cell
+                << " source_node=" << source.node
+                << " target_node=" << target.node
+                << " ms=" << OverlayDurationMs(search_stop - search_start)
+                << " reverse_ms="
+                << OverlayDurationMs(reverse_lower_bounds_stop - reverse_lower_bounds_start)
+                << " forward_ms=0 queue_pops=0 shortcut_candidates=0"
+                << " border_edge_candidates=0 best_updates=0 result=no_reverse_path";
+        }
         return best_path;
     }
+    */
+    const auto reverse_lower_bounds_stop = reverse_lower_bounds_start;
 
     const auto &partition = facade.GetMultiLevelPartition();
     const auto &cells = facade.GetCellStorage();
@@ -488,21 +564,28 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
     std::vector<bool> from_clique_arc(facade.GetNumberOfNodes(), false);
     std::vector<LevelID> overlay_levels(facade.GetNumberOfNodes(), INVALID_LEVEL_ID);
     std::priority_queue<QueueEntry, std::vector<QueueEntry>, QueueCompare> queue;
+    std::size_t queue_pops = 0;
+    std::size_t shortcut_candidates = 0;
+    std::size_t border_edge_candidates = 0;
+    std::size_t best_updates = 0;
 
     settled_costs[source.node] = EdgeDuration{0};
     parents[source.node] = source.node;
     queue.push({EdgeDuration{0}, source.node});
 
+    const auto forward_search_start = std::chrono::steady_clock::now();
     while (!queue.empty())
     {
         const auto current = queue.top();
         queue.pop();
+        ++queue_pops;
 
         if (current.cost != settled_costs[current.node])
         {
             continue;
         }
 
+        /*
         auto lower_bound = reverse_lower_bounds[current.node];
         if (lower_bound == INVALID_EDGE_DURATION)
         {
@@ -526,6 +609,7 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
         {
             continue;
         }
+        */
 
         if (current.node == target.node)
         {
@@ -548,6 +632,7 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
 
                 best_path.total_duration = candidate_total;
                 best_path.packed_path = std::move(packed_path);
+                ++best_updates;
             }
         }
 
@@ -566,6 +651,7 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
             for (std::size_t destination_index = 0; destination_index < shortcut_row.size;
                  ++destination_index)
             {
+                ++shortcut_candidates;
                 const auto destination = shortcut_row.destinations[destination_index];
                 if (destination == current.node ||
                     !CheckParentCellRestriction(partition, current_level, destination, restriction))
@@ -614,6 +700,7 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
             {
                 for (const auto edge : facade.GetBorderEdgeRange(edge_level, current.node))
                 {
+                    ++border_edge_candidates;
                     if (!facade.IsForwardEdge(edge))
                     {
                         continue;
@@ -649,6 +736,27 @@ TemporalOverlayPath SearchAtClock(const FacadeT &facade,
                     }
                 }
             });
+    }
+
+    if (timing_enabled)
+    {
+        const auto forward_search_stop = std::chrono::steady_clock::now();
+        const auto search_stop = forward_search_stop;
+        util::Log(logDEBUG)
+            << "[overlay query] search restricted=" << restriction.restricted
+            << " level=" << static_cast<int>(restriction.level)
+            << " parent_cell=" << restriction.parent_cell
+            << " source_node=" << source.node
+            << " target_node=" << target.node
+            << " ms=" << OverlayDurationMs(search_stop - search_start)
+            << " reverse_ms="
+            << OverlayDurationMs(reverse_lower_bounds_stop - reverse_lower_bounds_start)
+            << " forward_ms=" << OverlayDurationMs(forward_search_stop - forward_search_start)
+            << " queue_pops=" << queue_pops
+            << " shortcut_candidates=" << shortcut_candidates
+            << " border_edge_candidates=" << border_edge_candidates
+            << " best_updates=" << best_updates
+            << " valid=" << best_path.is_valid();
     }
 
     return best_path;
@@ -692,9 +800,24 @@ TemporalOverlayUnpackedPath UnpackPathImpl(const FacadeT &facade,
                                            const TemporalOverlayPath &path,
                                            const SearchRestriction &restriction)
 {
+    const auto timing_enabled = OverlayTimingEnabled();
+    const auto unpack_start = std::chrono::steady_clock::now();
     TemporalOverlayUnpackedPath unpacked;
     if (!path.is_valid())
     {
+        if (timing_enabled)
+        {
+            const auto unpack_stop = std::chrono::steady_clock::now();
+            util::Log(logDEBUG)
+                << "[overlay query] unpack restricted=" << restriction.restricted
+                << " level=" << static_cast<int>(restriction.level)
+                << " parent_cell=" << restriction.parent_cell
+                << " source_node=" << source.node
+                << " target_node=" << target.node
+                << " ms=" << OverlayDurationMs(unpack_stop - unpack_start)
+                << " base_edge_ms=0 recursive_search_ms=0 recursive_unpack_ms=0"
+                << " target_offset_ms=0 packed_edges=0 overlay_edges=0 valid=0";
+        }
         return unpacked;
     }
 
@@ -703,12 +826,30 @@ TemporalOverlayUnpackedPath UnpackPathImpl(const FacadeT &facade,
         unpacked.total_duration = temporal::detail::EvaluateLocalPathDuration(
             facade, source, target, departure_clock);
         unpacked.nodes = {source.node};
+        if (timing_enabled)
+        {
+            const auto unpack_stop = std::chrono::steady_clock::now();
+            util::Log(logDEBUG)
+                << "[overlay query] unpack restricted=" << restriction.restricted
+                << " level=" << static_cast<int>(restriction.level)
+                << " parent_cell=" << restriction.parent_cell
+                << " source_node=" << source.node
+                << " target_node=" << target.node
+                << " ms=" << OverlayDurationMs(unpack_stop - unpack_start)
+                << " base_edge_ms=0 recursive_search_ms=0 recursive_unpack_ms=0"
+                << " target_offset_ms=0 packed_edges=0 overlay_edges=0 valid=1 local=1";
+        }
         return unpacked;
     }
 
     const auto &partition = facade.GetMultiLevelPartition();
     auto current_clock = departure_clock;
     auto first_step = true;
+    std::chrono::steady_clock::duration base_edge_duration{0};
+    std::chrono::steady_clock::duration recursive_search_duration{0};
+    std::chrono::steady_clock::duration recursive_unpack_duration{0};
+    std::chrono::steady_clock::duration target_offset_duration{0};
+    std::size_t overlay_edge_count = 0;
 
     unpacked.nodes.push_back(path.packed_path.front().from);
     for (const auto &packed_edge : path.packed_path)
@@ -718,6 +859,7 @@ TemporalOverlayUnpackedPath UnpackPathImpl(const FacadeT &facade,
 
         if (!packed_edge.is_overlay)
         {
+            const auto base_edge_start = std::chrono::steady_clock::now();
             const auto edge = facade.FindEdge(from, to);
             if (edge == SPECIAL_EDGEID)
             {
@@ -735,9 +877,11 @@ TemporalOverlayUnpackedPath UnpackPathImpl(const FacadeT &facade,
             unpacked.edges.push_back(edge);
             current_clock = engine::temporal::AdvanceTemporalClock(current_clock, edge_duration);
             first_step = false;
+            base_edge_duration += std::chrono::steady_clock::now() - base_edge_start;
             continue;
         }
 
+        ++overlay_edge_count;
         const auto level = packed_edge.overlay_level;
         if (level == INVALID_LEVEL_ID || level == static_cast<LevelID>(0))
         {
@@ -751,15 +895,19 @@ TemporalOverlayUnpackedPath UnpackPathImpl(const FacadeT &facade,
         const DirectedPhantomEndpoint sub_source{&sub_source_phantom, from, false};
         const DirectedPhantomEndpoint sub_target{&sub_target_phantom, to, false};
         const SearchRestriction sub_restriction{true, sublevel, parent_cell};
+        const auto recursive_search_start = std::chrono::steady_clock::now();
         const auto sub_path =
             SearchAtClock(facade, sub_source, sub_target, current_clock, sub_restriction);
+        recursive_search_duration += std::chrono::steady_clock::now() - recursive_search_start;
         if (!sub_path.is_valid())
         {
             return {};
         }
 
+        const auto recursive_unpack_start = std::chrono::steady_clock::now();
         const auto unpacked_subpath =
             UnpackPathImpl(facade, sub_source, sub_target, current_clock, sub_path, sub_restriction);
+        recursive_unpack_duration += std::chrono::steady_clock::now() - recursive_unpack_start;
         if (!unpacked_subpath.is_valid())
         {
             return {};
@@ -776,6 +924,7 @@ TemporalOverlayUnpackedPath UnpackPathImpl(const FacadeT &facade,
         first_step = false;
     }
 
+    const auto target_offset_start = std::chrono::steady_clock::now();
     const auto target_duration =
         temporal::detail::GetPhantomTraversalDurationAtClock(facade, target, current_clock);
     if (target_duration == INVALID_EDGE_DURATION)
@@ -785,6 +934,27 @@ TemporalOverlayUnpackedPath UnpackPathImpl(const FacadeT &facade,
 
     current_clock = engine::temporal::AdvanceTemporalClock(current_clock, target_duration);
     unpacked.total_duration = to_alias<EdgeDuration>(current_clock - departure_clock);
+    target_offset_duration += std::chrono::steady_clock::now() - target_offset_start;
+
+    if (timing_enabled)
+    {
+        const auto unpack_stop = std::chrono::steady_clock::now();
+        util::Log(logDEBUG)
+            << "[overlay query] unpack restricted=" << restriction.restricted
+            << " level=" << static_cast<int>(restriction.level)
+            << " parent_cell=" << restriction.parent_cell
+            << " source_node=" << source.node
+            << " target_node=" << target.node
+            << " ms=" << OverlayDurationMs(unpack_stop - unpack_start)
+            << " base_edge_ms=" << OverlayDurationMs(base_edge_duration)
+            << " recursive_search_ms=" << OverlayDurationMs(recursive_search_duration)
+            << " recursive_unpack_ms=" << OverlayDurationMs(recursive_unpack_duration)
+            << " target_offset_ms=" << OverlayDurationMs(target_offset_duration)
+            << " packed_edges=" << path.packed_path.size()
+            << " overlay_edges=" << overlay_edge_count
+            << " valid=1";
+    }
+
     return unpacked;
 }
 } // namespace detail
