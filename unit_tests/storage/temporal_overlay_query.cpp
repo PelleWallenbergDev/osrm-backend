@@ -16,6 +16,8 @@ namespace
 using namespace osrm;
 using TemporalShortcutRowView =
     engine::datafacade::AlgorithmDataFacade<engine::datafacade::MLD>::TemporalShortcutRowView;
+using TemporalIncomingShortcutRowView =
+    engine::datafacade::AlgorithmDataFacade<engine::datafacade::MLD>::TemporalIncomingShortcutRowView;
 
 struct MockPartition
 {
@@ -238,6 +240,21 @@ struct MockFacade
                 overlay_function_ids.data(),
                 overlay_min_durations.data(),
                 overlay_function_ids.size()};
+    }
+
+    TemporalIncomingShortcutRowView
+    GetTemporalIncomingShortcutRow(LevelID level, CellID cell_id, NodeID to) const
+    {
+        if (level != 1 || cell_id != 0 || to != 3)
+        {
+            return {};
+        }
+
+        return {cells.level_one_cell.source_nodes.data(),
+                overlay_function_ids.data(),
+                overlay_min_durations.data(),
+                overlay_function_ids.size(),
+                1};
     }
 
     EdgeDuration GetTemporalFunctionDuration(customizer::TemporalFunctionID function_id,
@@ -482,6 +499,21 @@ struct ArrivalSensitiveFacade
                 overlay_function_ids.data(),
                 overlay_min_durations.data(),
                 overlay_function_ids.size()};
+    }
+
+    TemporalIncomingShortcutRowView
+    GetTemporalIncomingShortcutRow(LevelID level, CellID cell_id, NodeID to) const
+    {
+        if (level != 1 || cell_id != 0 || to != 4)
+        {
+            return {};
+        }
+
+        return {cells.level_one_cell.source_nodes.data(),
+                overlay_function_ids.data(),
+                overlay_min_durations.data(),
+                overlay_function_ids.size(),
+                1};
     }
 
     EdgeDuration GetTemporalFunctionDuration(customizer::TemporalFunctionID function_id,
@@ -857,6 +889,21 @@ struct StaticTemporalDivergenceFacade
                 overlay_function_ids.size()};
     }
 
+    TemporalIncomingShortcutRowView
+    GetTemporalIncomingShortcutRow(LevelID level, CellID cell_id, NodeID to) const
+    {
+        if (level != 1 || cell_id != 0 || to != 4)
+        {
+            return {};
+        }
+
+        return {cells.level_one_cell.source_nodes.data(),
+                overlay_function_ids.data(),
+                overlay_min_durations.data(),
+                overlay_function_ids.size(),
+                1};
+    }
+
     EdgeDuration GetTemporalFunctionDuration(customizer::TemporalFunctionID function_id,
                                              std::uint32_t week_bucket) const
     {
@@ -886,6 +933,11 @@ struct MissingShortcutFallbackFacade : StaticTemporalDivergenceFacade
 {
     TemporalShortcutRowView GetTemporalShortcutRow(LevelID, CellID, NodeID) const { return {}; }
 
+    TemporalIncomingShortcutRowView GetTemporalIncomingShortcutRow(LevelID, CellID, NodeID) const
+    {
+        return {};
+    }
+
     EdgeDuration GetTemporalShortcutDuration(LevelID,
                                              CellID,
                                              NodeID,
@@ -893,6 +945,24 @@ struct MissingShortcutFallbackFacade : StaticTemporalDivergenceFacade
                                              std::uint32_t) const
     {
         return INVALID_EDGE_DURATION;
+    }
+
+    EdgeDuration GetTemporalShortcutMinDuration(LevelID, CellID, NodeID, NodeID) const
+    {
+        return INVALID_EDGE_DURATION;
+    }
+};
+
+struct IncomingShortcutRowOnlyFacade : MockFacade
+{
+    IncomingShortcutRowOnlyFacade()
+    {
+        for (auto node = 0U; node < static_durations.size(); ++node)
+        {
+            static_durations[node] = {SegmentDuration{10}};
+            temporal_durations[node] = {
+                EdgeDuration{10}, EdgeDuration{10}, EdgeDuration{10}, EdgeDuration{10}};
+        }
     }
 
     EdgeDuration GetTemporalShortcutMinDuration(LevelID, CellID, NodeID, NodeID) const
@@ -1152,6 +1222,35 @@ BOOST_AUTO_TEST_CASE(reverse_lower_bound_target_set_matches_pointwise_minimum_of
                           pointwise_minimum(lower_bounds_to_two[index],
                                             lower_bounds_to_three[index]));
     }
+}
+
+BOOST_AUTO_TEST_CASE(reverse_lower_bounds_use_incoming_shortcut_row_view)
+{
+    IncomingShortcutRowOnlyFacade facade;
+
+    const auto source_phantom = MakeZeroTraversalPhantom(0);
+    const auto target_phantom = MakeZeroTraversalPhantom(3);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 3, false};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        source_endpoints{source};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        target_endpoints{target};
+    const auto shared_query_level_policy =
+        engine::routing_algorithms::mld::temporal::overlay::detail::MakeSharedEndpointQueryLevelPolicy(
+            facade, source_endpoints, target_endpoints);
+
+    const auto lower_bounds =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target, {}, shared_query_level_policy);
+
+    BOOST_REQUIRE_EQUAL(lower_bounds.size(), facade.GetNumberOfNodes());
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(lower_bounds[3]), 0);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(lower_bounds[2]), 10);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(lower_bounds[1]), 20);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(lower_bounds[0]), 15);
 }
 
 BOOST_AUTO_TEST_CASE(precomputed_target_set_reverse_lower_bounds_search_matches_exact_target_search)

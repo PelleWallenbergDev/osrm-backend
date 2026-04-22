@@ -77,6 +77,31 @@ template <> class AlgorithmDataFacade<MLD>
         }
     };
 
+    struct TemporalIncomingShortcutRowView
+    {
+        const NodeID *sources = nullptr;
+        const customizer::TemporalFunctionID *function_ids = nullptr;
+        const EdgeDuration *min_durations = nullptr;
+        std::size_t size = 0;
+        std::size_t value_stride = 1;
+
+        bool empty() const
+        {
+            return size == 0 || sources == nullptr || function_ids == nullptr ||
+                   min_durations == nullptr;
+        }
+
+        customizer::TemporalFunctionID GetFunctionID(const std::size_t index) const
+        {
+            return function_ids[index * value_stride];
+        }
+
+        EdgeDuration GetMinDuration(const std::size_t index) const
+        {
+            return min_durations[index * value_stride];
+        }
+    };
+
     virtual ~AlgorithmDataFacade() = default;
 
     // search graph access
@@ -130,6 +155,11 @@ template <> class AlgorithmDataFacade<MLD>
     virtual TemporalShortcutRowView GetTemporalShortcutRow(const LevelID level,
                                                            const CellID cell_id,
                                                            const NodeID from) const = 0;
+
+    virtual TemporalIncomingShortcutRowView
+    GetTemporalIncomingShortcutRow(const LevelID level,
+                                   const CellID cell_id,
+                                   const NodeID to) const = 0;
 
     virtual EdgeDuration
     GetTemporalFunctionDuration(const customizer::TemporalFunctionID function_id,

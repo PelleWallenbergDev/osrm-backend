@@ -545,21 +545,22 @@ void RelaxReverseShortcutPredecessors(const FacadeT &facade,
     }
 
     const auto &partition = facade.GetMultiLevelPartition();
-    const auto &cells = facade.GetCellStorage();
     const auto cell_id = partition.GetCell(level, current_node);
-    const auto cell = cells.GetUnfilledCell(level, cell_id);
+    const auto incoming_shortcuts =
+        facade.GetTemporalIncomingShortcutRow(level, cell_id, current_node);
 
-    for (const auto predecessor : cell.GetSourceNodes())
+    for (auto predecessor_index = std::size_t{0}; predecessor_index < incoming_shortcuts.size;
+         ++predecessor_index)
     {
         ++stats.clique_candidates;
+        const auto predecessor = incoming_shortcuts.sources[predecessor_index];
         if (predecessor == current_node ||
             !CheckParentCellRestriction(partition, level, predecessor, restriction))
         {
             continue;
         }
 
-        const auto shortcut_min =
-            facade.GetTemporalShortcutMinDuration(level, cell_id, predecessor, current_node);
+        const auto shortcut_min = incoming_shortcuts.GetMinDuration(predecessor_index);
         const auto candidate = temporal::detail::SafeDurationAdd(current_cost, shortcut_min);
 
         if (candidate == INVALID_EDGE_DURATION)

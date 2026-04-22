@@ -732,6 +732,8 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
     using TemporalFunctionStorageView = customizer::TemporalFunctionStorageView;
     using TemporalCellMetricView = customizer::TemporalCellMetricView;
     using TemporalShortcutRowView = typename AlgorithmDataFacade<MLD>::TemporalShortcutRowView;
+    using TemporalIncomingShortcutRowView =
+        typename AlgorithmDataFacade<MLD>::TemporalIncomingShortcutRowView;
 
     // MLD data
     partitioner::MultiLevelPartitionView mld_partition;
@@ -865,6 +867,39 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
         }
 
         return {destinations.begin(), function_row.begin(), min_duration_row.begin(), size};
+    }
+
+    TemporalIncomingShortcutRowView
+    GetTemporalIncomingShortcutRow(const LevelID level,
+                                   const CellID cell_id,
+                                   const NodeID to) const override final
+    {
+        if (!mld_temporal_cell_metric || !mld_temporal_cell_storage)
+        {
+            return {};
+        }
+
+        const auto cell = mld_temporal_cell_metric->GetCell(mld_cell_storage, level, cell_id);
+        const auto sources = cell.GetSourceNodes();
+        const auto destinations = cell.GetDestinationNodes();
+        const auto function_column = cell.GetInFunctionID(to);
+        const auto min_duration_column = cell.GetInMinDuration(to);
+        const auto size =
+            static_cast<std::size_t>(std::distance(function_column.begin(), function_column.end()));
+
+        if (size == 0)
+        {
+            return {};
+        }
+
+        const auto value_stride =
+            static_cast<std::size_t>(std::distance(destinations.begin(), destinations.end()));
+
+        return {sources.begin(),
+                std::addressof(*function_column.begin()),
+                std::addressof(*min_duration_column.begin()),
+                size,
+                value_stride};
     }
 
     EdgeDuration
