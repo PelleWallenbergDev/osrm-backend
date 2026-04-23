@@ -18,6 +18,8 @@ using TemporalShortcutRowView =
     engine::datafacade::AlgorithmDataFacade<engine::datafacade::MLD>::TemporalShortcutRowView;
 using TemporalIncomingShortcutRowView =
     engine::datafacade::AlgorithmDataFacade<engine::datafacade::MLD>::TemporalIncomingShortcutRowView;
+using IncomingBorderEdgeRowView =
+    engine::datafacade::AlgorithmDataFacade<engine::datafacade::MLD>::IncomingBorderEdgeRowView;
 
 struct MockPartition
 {
@@ -79,7 +81,80 @@ struct MockEdge
     EdgeData data{};
 };
 
-struct MockFacade
+template <typename FacadeT>
+void BuildIncomingBorderEdgeRows(const FacadeT &facade,
+                                 std::vector<std::vector<EdgeID>> &incoming_border_edges,
+                                 std::vector<std::vector<LevelID>> &incoming_border_levels)
+{
+    const auto number_of_nodes = static_cast<std::size_t>(facade.GetNumberOfNodes());
+    const auto number_of_levels =
+        static_cast<std::size_t>(facade.GetMultiLevelPartition().GetNumberOfLevels());
+
+    incoming_border_edges.assign(number_of_nodes, {});
+    incoming_border_levels.assign(number_of_nodes, {});
+
+    for (NodeID node = 0; node < number_of_nodes; ++node)
+    {
+        std::vector<EdgeID> seen_edges;
+
+        for (auto level_index = number_of_levels; level_index-- > 0;)
+        {
+            const auto level = static_cast<LevelID>(level_index);
+            for (const auto edge : facade.GetBorderEdgeRange(level, node))
+            {
+                if (std::find(seen_edges.begin(), seen_edges.end(), edge) != seen_edges.end())
+                {
+                    continue;
+                }
+
+                seen_edges.push_back(edge);
+                if (!facade.IsBackwardEdge(edge))
+                {
+                    continue;
+                }
+
+                incoming_border_edges[node].push_back(edge);
+                incoming_border_levels[node].push_back(level);
+            }
+        }
+    }
+}
+
+template <typename DerivedT> struct IncomingBorderEdgeIndexMixin
+{
+    IncomingBorderEdgeRowView GetIncomingBorderEdgeRow(const NodeID node) const
+    {
+        EnsureIncomingBorderEdgeRows();
+
+        if (node >= incoming_border_edges.size() || incoming_border_edges[node].empty())
+        {
+            return {};
+        }
+
+        return {incoming_border_edges[node].data(),
+                incoming_border_levels[node].data(),
+                incoming_border_edges[node].size()};
+    }
+
+  private:
+    void EnsureIncomingBorderEdgeRows() const
+    {
+        if (incoming_border_rows_initialized)
+        {
+            return;
+        }
+
+        const auto &derived = static_cast<const DerivedT &>(*this);
+        BuildIncomingBorderEdgeRows(derived, incoming_border_edges, incoming_border_levels);
+        incoming_border_rows_initialized = true;
+    }
+
+    mutable bool incoming_border_rows_initialized = false;
+    mutable std::vector<std::vector<EdgeID>> incoming_border_edges;
+    mutable std::vector<std::vector<LevelID>> incoming_border_levels;
+};
+
+struct MockFacade : IncomingBorderEdgeIndexMixin<MockFacade>
 {
     MockPartition partition;
     MockCellStorage cells;
@@ -87,6 +162,7 @@ struct MockFacade
     std::array<std::vector<std::vector<EdgeID>>, 2> border_edges;
     std::vector<std::vector<SegmentDuration>> static_durations;
     std::vector<std::vector<EdgeDuration>> temporal_durations;
+    std::vector<TurnPenalty> turn_penalties;
     std::vector<EdgeDuration> overlay_shortcut;
     std::array<customizer::TemporalFunctionID, 1> overlay_function_ids{{0}};
     std::array<EdgeDuration, 1> overlay_min_durations{{EdgeDuration{15}}};
@@ -119,11 +195,23 @@ struct MockFacade
         AddEdge(0, 3, 2, false, true);
     }
 
-    void AddEdge(LevelID level, NodeID from, NodeID to, bool forward, bool backward)
+    void AddEdge(LevelID level,
+                 NodeID from,
+                 NodeID to,
+                 bool forward,
+                 bool backward,
+                 EdgeID turn_id = 0,
+                 TurnPenalty penalty = TurnPenalty{0})
     {
         const auto edge_id = static_cast<EdgeID>(edges.size());
-        edges.push_back(MockEdge{to, forward, backward, {}});
+        edges.push_back(MockEdge{to, forward, backward, {turn_id}});
         border_edges[level][from].push_back(edge_id);
+
+        if (turn_penalties.size() <= turn_id)
+        {
+            turn_penalties.resize(turn_id + 1, TurnPenalty{0});
+        }
+        turn_penalties[turn_id] = penalty;
     }
 
     unsigned GetNumberOfNodes() const { return static_cast<unsigned>(static_durations.size()); }
@@ -153,7 +241,10 @@ struct MockFacade
         return edges[edge].data;
     }
 
-    TurnPenalty GetDurationPenaltyForEdgeID(EdgeID) const { return TurnPenalty{0}; }
+    TurnPenalty GetDurationPenaltyForEdgeID(EdgeID turn_id) const
+    {
+        return turn_id < turn_penalties.size() ? turn_penalties[turn_id] : TurnPenalty{0};
+    }
 
     bool ExcludeNode(NodeID) const { return false; }
 
@@ -322,7 +413,7 @@ struct ArrivalSensitiveCellStorage
     }
 };
 
-struct ArrivalSensitiveFacade
+struct ArrivalSensitiveFacade : IncomingBorderEdgeIndexMixin<ArrivalSensitiveFacade>
 {
     ArrivalSensitivePartition partition;
     ArrivalSensitiveCellStorage cells;
@@ -720,7 +811,7 @@ struct DivergenceCellStorage
     }
 };
 
-struct StaticTemporalDivergenceFacade
+struct StaticTemporalDivergenceFacade : IncomingBorderEdgeIndexMixin<StaticTemporalDivergenceFacade>
 {
     DivergencePartition partition;
     DivergenceCellStorage cells;
@@ -970,6 +1061,148 @@ struct IncomingShortcutRowOnlyFacade : MockFacade
         return INVALID_EDGE_DURATION;
     }
 };
+
+struct DuplicateRangeFacade : MockFacade
+{
+    DuplicateRangeFacade()
+    {
+        edges.clear();
+        turn_penalties.clear();
+        for (auto &level_edges : border_edges)
+        {
+            for (auto &node_edges : level_edges)
+            {
+                node_edges.clear();
+            }
+        }
+
+        AddEdge(LevelID{1}, 3, 2, false, true);
+        border_edges[0][3].push_back(EdgeID{0});
+        AddEdge(LevelID{0}, 3, 1, false, true);
+        AddEdge(LevelID{1}, 3, 0, true, false);
+        border_edges[0][3].push_back(EdgeID{2});
+    }
+};
+
+struct ParallelEdgeFacade : MockFacade
+{
+    ParallelEdgeFacade()
+    {
+        edges.clear();
+        turn_penalties.clear();
+        for (auto &level_edges : border_edges)
+        {
+            for (auto &node_edges : level_edges)
+            {
+                node_edges.clear();
+            }
+        }
+
+        AddEdge(LevelID{0}, 3, 2, false, true, EdgeID{0}, TurnPenalty{5});
+        AddEdge(LevelID{0}, 3, 2, false, true, EdgeID{1}, TurnPenalty{0});
+    }
+};
+
+template <typename FacadeT>
+void RelaxReverseBorderPredecessorsReference(
+    const FacadeT &facade,
+    const NodeID current_node,
+    const EdgeDuration current_cost,
+    const LevelID level,
+    const engine::routing_algorithms::mld::temporal::overlay::detail::SearchRestriction &restriction,
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundWorkspace &workspace,
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundSearchStats &stats)
+{
+    namespace overlay_detail = engine::routing_algorithms::mld::temporal::overlay::detail;
+
+    const auto &partition = facade.GetMultiLevelPartition();
+
+    overlay_detail::ForEachDescendingLevel(
+        level,
+        [&](const LevelID edge_level)
+        {
+            for (const auto edge : facade.GetBorderEdgeRange(edge_level, current_node))
+            {
+                ++stats.border_edge_candidates;
+                if (!facade.IsBackwardEdge(edge))
+                {
+                    continue;
+                }
+
+                const auto predecessor = facade.GetTarget(edge);
+                if (facade.ExcludeNode(predecessor) ||
+                    !overlay_detail::CheckParentCellRestriction(
+                        partition, edge_level, predecessor, restriction))
+                {
+                    continue;
+                }
+
+                const auto node_duration =
+                    engine::routing_algorithms::mld::temporal::detail::GetNodeLowerBoundDuration(
+                        facade, predecessor);
+                const auto turn_penalty =
+                    engine::routing_algorithms::mld::temporal::detail::TurnPenaltyToDuration(
+                    facade.GetDurationPenaltyForEdgeID(facade.GetEdgeData(edge).turn_id));
+                const auto edge_cost =
+                    engine::temporal::detail::SafeDurationAdd(node_duration, turn_penalty);
+                const auto candidate =
+                    engine::temporal::detail::SafeDurationAdd(current_cost, edge_cost);
+
+                if (candidate == INVALID_EDGE_DURATION)
+                {
+                    continue;
+                }
+
+                if (workspace.lower_bounds[predecessor] == INVALID_EDGE_DURATION ||
+                    candidate < workspace.lower_bounds[predecessor])
+                {
+                    overlay_detail::UpdateReverseLowerBound(
+                        workspace, stats, predecessor, candidate, false);
+                }
+            }
+        });
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+std::vector<EdgeDuration> ComputeReverseLowerBoundsWithReferenceBorderScan(
+    const FacadeT &facade,
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint &target,
+    const engine::routing_algorithms::mld::temporal::overlay::detail::SearchRestriction &restriction,
+    const QueryLevelPolicyT &query_level_policy)
+{
+    namespace overlay_detail = engine::routing_algorithms::mld::temporal::overlay::detail;
+
+    overlay_detail::ReverseLowerBoundWorkspace workspace{facade.GetNumberOfNodes()};
+    overlay_detail::ReverseLowerBoundSearchStats stats;
+    overlay_detail::InitializeReverseLowerBounds(facade, target, workspace, stats);
+
+    while (!workspace.queue.empty())
+    {
+        const auto current = workspace.queue.top();
+        workspace.queue.pop();
+
+        if (current.node >= workspace.lower_bounds.size() ||
+            current.cost != workspace.lower_bounds[current.node])
+        {
+            continue;
+        }
+
+        const auto level = query_level_policy.GetNodeQueryLevel(current.node, restriction);
+        overlay_detail::RelaxReverseShortcutPredecessors(
+            facade,
+            current.node,
+            current.cost,
+            level,
+            restriction,
+            query_level_policy,
+            workspace,
+            stats);
+        RelaxReverseBorderPredecessorsReference(
+            facade, current.node, current.cost, level, restriction, workspace, stats);
+    }
+
+    return workspace.lower_bounds;
+}
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(temporal_overlay_query)
@@ -1137,6 +1370,106 @@ BOOST_AUTO_TEST_CASE(reverse_lower_bound_workspace_reuse_matches_public_results)
                                   restricted_copy.end(),
                                   restricted_reference.begin(),
                                   restricted_reference.end());
+}
+
+BOOST_AUTO_TEST_CASE(reverse_lower_bounds_match_reference_border_scan_for_arrival_sensitive_facade)
+{
+    ArrivalSensitiveFacade facade;
+
+    const auto source_phantom = MakeZeroTraversalPhantom(1);
+    const auto target_phantom = MakeZeroTraversalPhantom(4);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 1, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 4, false};
+    const engine::routing_algorithms::mld::temporal::overlay::detail::PairQueryLevelPolicy
+        query_level_policy{facade.GetMultiLevelPartition(), source, target};
+    const auto restriction =
+        engine::routing_algorithms::mld::temporal::overlay::detail::SearchRestriction{
+            true, LevelID{1}, CellID{0}};
+
+    const auto unrestricted =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target, {}, query_level_policy);
+    const auto unrestricted_reference = ComputeReverseLowerBoundsWithReferenceBorderScan(
+        facade, target, {}, query_level_policy);
+    const auto restricted =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target, restriction, query_level_policy);
+    const auto restricted_reference = ComputeReverseLowerBoundsWithReferenceBorderScan(
+        facade, target, restriction, query_level_policy);
+
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        unrestricted.begin(), unrestricted.end(), unrestricted_reference.begin(), unrestricted_reference.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        restricted.begin(), restricted.end(), restricted_reference.begin(), restricted_reference.end());
+}
+
+BOOST_AUTO_TEST_CASE(incoming_border_edge_row_deduplicates_repeated_backward_edges)
+{
+    DuplicateRangeFacade facade;
+
+    const auto row = facade.GetIncomingBorderEdgeRow(3);
+    BOOST_REQUIRE_EQUAL(row.size, 2U);
+
+    std::vector<std::pair<NodeID, LevelID>> predecessor_levels;
+    predecessor_levels.reserve(row.size);
+    for (auto index = std::size_t{0}; index < row.size; ++index)
+    {
+        predecessor_levels.push_back({facade.GetTarget(row.edges[index]), row.highest_border_levels[index]});
+    }
+    std::sort(predecessor_levels.begin(), predecessor_levels.end());
+
+    BOOST_CHECK_EQUAL(predecessor_levels[0].first, 1U);
+    BOOST_CHECK_EQUAL(predecessor_levels[0].second, LevelID{0});
+    BOOST_CHECK_EQUAL(predecessor_levels[1].first, 2U);
+    BOOST_CHECK_EQUAL(predecessor_levels[1].second, LevelID{1});
+
+    const auto source_phantom = MakeZeroTraversalPhantom(0);
+    const auto target_phantom = MakeZeroTraversalPhantom(3);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 3, false};
+    const engine::routing_algorithms::mld::temporal::overlay::detail::PairQueryLevelPolicy
+        query_level_policy{facade.GetMultiLevelPartition(), source, target};
+
+    const auto indexed =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target, {}, query_level_policy);
+    const auto reference =
+        ComputeReverseLowerBoundsWithReferenceBorderScan(facade, target, {}, query_level_policy);
+
+    BOOST_CHECK_EQUAL_COLLECTIONS(indexed.begin(), indexed.end(), reference.begin(), reference.end());
+}
+
+BOOST_AUTO_TEST_CASE(incoming_border_edge_row_preserves_parallel_backward_edges)
+{
+    ParallelEdgeFacade facade;
+
+    const auto row = facade.GetIncomingBorderEdgeRow(3);
+    BOOST_REQUIRE_EQUAL(row.size, 2U);
+    BOOST_CHECK_NE(row.edges[0], row.edges[1]);
+    BOOST_CHECK_EQUAL(facade.GetTarget(row.edges[0]), 2U);
+    BOOST_CHECK_EQUAL(facade.GetTarget(row.edges[1]), 2U);
+
+    const auto source_phantom = MakeZeroTraversalPhantom(0);
+    const auto target_phantom = MakeZeroTraversalPhantom(3);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 3, false};
+    const engine::routing_algorithms::mld::temporal::overlay::detail::PairQueryLevelPolicy
+        query_level_policy{facade.GetMultiLevelPartition(), source, target};
+
+    const auto indexed =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBounds(
+            facade, target, {}, query_level_policy);
+    const auto reference =
+        ComputeReverseLowerBoundsWithReferenceBorderScan(facade, target, {}, query_level_policy);
+
+    BOOST_CHECK_EQUAL_COLLECTIONS(indexed.begin(), indexed.end(), reference.begin(), reference.end());
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(indexed[2]), 5);
 }
 
 BOOST_AUTO_TEST_CASE(reverse_lower_bound_target_set_initialization_keeps_minimum_seed_per_node)

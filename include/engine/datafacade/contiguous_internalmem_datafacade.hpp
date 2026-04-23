@@ -734,6 +734,8 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
     using TemporalShortcutRowView = typename AlgorithmDataFacade<MLD>::TemporalShortcutRowView;
     using TemporalIncomingShortcutRowView =
         typename AlgorithmDataFacade<MLD>::TemporalIncomingShortcutRowView;
+    using IncomingBorderEdgeRowView =
+        typename AlgorithmDataFacade<MLD>::IncomingBorderEdgeRowView;
 
     // MLD data
     partitioner::MultiLevelPartitionView mld_partition;
@@ -746,6 +748,9 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
     using GraphEdge = QueryGraph::EdgeArrayEntry;
 
     QueryGraph query_graph;
+    std::vector<std::size_t> incoming_border_edge_offsets;
+    std::vector<EdgeID> incoming_border_edge_ids;
+    std::vector<LevelID> incoming_border_edge_levels;
 
     customizer::TemporalFunctionID FindTemporalShortcutFunctionID(const LevelID level,
                                                                  const CellID cell_id,
@@ -783,6 +788,46 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
         }
     }
 
+    void BuildIncomingBorderEdgeIndex()
+    {
+        const auto number_of_nodes = static_cast<std::size_t>(query_graph.GetNumberOfNodes());
+        const auto number_of_levels = static_cast<std::size_t>(query_graph.GetNumberOfLevels());
+
+        incoming_border_edge_offsets.clear();
+        incoming_border_edge_ids.clear();
+        incoming_border_edge_levels.clear();
+
+        incoming_border_edge_offsets.reserve(number_of_nodes + 1);
+        incoming_border_edge_offsets.push_back(0);
+
+        for (auto node_index = std::size_t{0}; node_index < number_of_nodes; ++node_index)
+        {
+            const auto node = static_cast<NodeID>(node_index);
+            auto previous_begin = query_graph.EndEdges(node);
+
+            for (auto level_index = number_of_levels; level_index-- > 0;)
+            {
+                const auto level = static_cast<LevelID>(level_index);
+                const auto begin = query_graph.BeginBorderEdges(level, node);
+
+                for (auto edge = begin; edge < previous_begin; ++edge)
+                {
+                    if (!query_graph.IsBackwardEdge(edge))
+                    {
+                        continue;
+                    }
+
+                    incoming_border_edge_ids.push_back(edge);
+                    incoming_border_edge_levels.push_back(level);
+                }
+
+                previous_begin = begin;
+            }
+
+            incoming_border_edge_offsets.push_back(incoming_border_edge_ids.size());
+        }
+    }
+
     // allocator that keeps the allocation data
     std::shared_ptr<ContiguousBlockAllocator> allocator;
 
@@ -794,6 +839,7 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
         : allocator(std::move(allocator_))
     {
         InitializeInternalPointers(allocator->GetIndex(), metric_name, exclude_index);
+        BuildIncomingBorderEdgeIndex();
     }
 
     const partitioner::MultiLevelPartitionView &GetMultiLevelPartition() const override
@@ -900,6 +946,29 @@ template <> class ContiguousInternalMemoryAlgorithmDataFacade<MLD> : public Algo
                 std::addressof(*min_duration_column.begin()),
                 size,
                 value_stride};
+    }
+
+    IncomingBorderEdgeRowView
+    GetIncomingBorderEdgeRow(const NodeID edge_based_node_id) const override final
+    {
+        const auto node_index = static_cast<std::size_t>(edge_based_node_id);
+        if (node_index + 1 >= incoming_border_edge_offsets.size())
+        {
+            return {};
+        }
+
+        const auto begin = incoming_border_edge_offsets[node_index];
+        const auto end = incoming_border_edge_offsets[node_index + 1];
+        const auto size = end - begin;
+
+        if (size == 0)
+        {
+            return {};
+        }
+
+        return {incoming_border_edge_ids.data() + begin,
+                incoming_border_edge_levels.data() + begin,
+                size};
     }
 
     EdgeDuration

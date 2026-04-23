@@ -586,47 +586,54 @@ void RelaxReverseBorderPredecessors(const FacadeT &facade,
                                     ReverseLowerBoundSearchStats &stats)
 {
     const auto &partition = facade.GetMultiLevelPartition();
+    const auto incoming_border_edges = facade.GetIncomingBorderEdgeRow(current_node);
 
-    ForEachDescendingLevel(
-        level,
-        [&](const LevelID edge_level)
+    for (auto index = std::size_t{0}; index < incoming_border_edges.size; ++index)
+    {
+        const auto edge = incoming_border_edges.edges[index];
+        const auto highest_border_level = incoming_border_edges.highest_border_levels[index];
+        const auto predecessor = facade.GetTarget(edge);
+
+        if (facade.ExcludeNode(predecessor))
         {
-            for (const auto edge : facade.GetBorderEdgeRange(edge_level, current_node))
+            continue;
+        }
+
+        const auto node_duration = temporal::detail::GetNodeLowerBoundDuration(facade, predecessor);
+        const auto turn_penalty = temporal::detail::TurnPenaltyToDuration(
+            facade.GetDurationPenaltyForEdgeID(facade.GetEdgeData(edge).turn_id));
+        const auto edge_cost = temporal::detail::SafeDurationAdd(node_duration, turn_penalty);
+        const auto candidate = temporal::detail::SafeDurationAdd(current_cost, edge_cost);
+
+        if (candidate == INVALID_EDGE_DURATION)
+        {
+            continue;
+        }
+
+        const auto relax_predecessor = [&](const LevelID edge_level)
+        {
+            ++stats.border_edge_candidates;
+            if (!CheckParentCellRestriction(partition, edge_level, predecessor, restriction))
             {
-                ++stats.border_edge_candidates;
-                if (!facade.IsBackwardEdge(edge))
-                {
-                    continue;
-                }
-
-                const auto predecessor = facade.GetTarget(edge);
-                if (facade.ExcludeNode(predecessor) ||
-                    !CheckParentCellRestriction(partition, edge_level, predecessor, restriction))
-                {
-                    continue;
-                }
-
-                const auto node_duration =
-                    temporal::detail::GetNodeLowerBoundDuration(facade, predecessor);
-                const auto turn_penalty = temporal::detail::TurnPenaltyToDuration(
-                    facade.GetDurationPenaltyForEdgeID(facade.GetEdgeData(edge).turn_id));
-                const auto edge_cost =
-                    temporal::detail::SafeDurationAdd(node_duration, turn_penalty);
-                const auto candidate =
-                    temporal::detail::SafeDurationAdd(current_cost, edge_cost);
-
-                if (candidate == INVALID_EDGE_DURATION)
-                {
-                    continue;
-                }
-
-                if (workspace.lower_bounds[predecessor] == INVALID_EDGE_DURATION ||
-                    candidate < workspace.lower_bounds[predecessor])
-                {
-                    UpdateReverseLowerBound(workspace, stats, predecessor, candidate, false);
-                }
+                return;
             }
-        });
+
+            if (workspace.lower_bounds[predecessor] == INVALID_EDGE_DURATION ||
+                candidate < workspace.lower_bounds[predecessor])
+            {
+                UpdateReverseLowerBound(workspace, stats, predecessor, candidate, false);
+            }
+        };
+
+        const auto effective_level = std::min(level, highest_border_level);
+        if (!restriction.restricted)
+        {
+            relax_predecessor(effective_level);
+            continue;
+        }
+
+        ForEachDescendingLevel(effective_level, relax_predecessor);
+    }
 }
 
 template <typename FacadeT, typename QueryLevelPolicyT>

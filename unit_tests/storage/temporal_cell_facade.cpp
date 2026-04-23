@@ -280,4 +280,28 @@ BOOST_AUTO_TEST_CASE(mld_facade_handles_missing_temporal_shortcut_sidecar)
                       from_alias<std::int32_t>(INVALID_EDGE_DURATION));
 }
 
+BOOST_AUTO_TEST_CASE(mld_facade_builds_incoming_border_edge_rows_from_query_graph)
+{
+    auto allocator = makeAllocator(false);
+    engine::datafacade::ContiguousInternalMemoryAlgorithmDataFacade<engine::datafacade::MLD> facade(
+        allocator, "duration", 0);
+
+    const auto row = facade.GetIncomingBorderEdgeRow(1);
+    BOOST_REQUIRE_EQUAL(row.size, 2U);
+
+    std::vector<std::pair<NodeID, LevelID>> predecessor_levels;
+    predecessor_levels.reserve(row.size);
+    for (auto index = std::size_t{0}; index < row.size; ++index)
+    {
+        predecessor_levels.push_back({facade.GetTarget(row.edges[index]), row.highest_border_levels[index]});
+    }
+    std::sort(predecessor_levels.begin(), predecessor_levels.end());
+
+    BOOST_CHECK_EQUAL(predecessor_levels[0].first, 0U);
+    BOOST_CHECK_EQUAL(predecessor_levels[0].second, LevelID{0});
+    BOOST_CHECK_EQUAL(predecessor_levels[1].first, 3U);
+    BOOST_CHECK_EQUAL(predecessor_levels[1].second, LevelID{1});
+    BOOST_CHECK(facade.GetIncomingBorderEdgeRow(0).empty());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

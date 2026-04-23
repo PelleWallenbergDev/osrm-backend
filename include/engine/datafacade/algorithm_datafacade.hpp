@@ -102,6 +102,18 @@ template <> class AlgorithmDataFacade<MLD>
         }
     };
 
+    struct IncomingBorderEdgeRowView
+    {
+        const EdgeID *edges = nullptr;
+        const LevelID *highest_border_levels = nullptr;
+        std::size_t size = 0;
+
+        bool empty() const
+        {
+            return size == 0 || edges == nullptr || highest_border_levels == nullptr;
+        }
+    };
+
     virtual ~AlgorithmDataFacade() = default;
 
     // search graph access
@@ -160,6 +172,9 @@ template <> class AlgorithmDataFacade<MLD>
     GetTemporalIncomingShortcutRow(const LevelID level,
                                    const CellID cell_id,
                                    const NodeID to) const = 0;
+
+    virtual IncomingBorderEdgeRowView
+    GetIncomingBorderEdgeRow(const NodeID edge_based_node_id) const = 0;
 
     virtual EdgeDuration
     GetTemporalFunctionDuration(const customizer::TemporalFunctionID function_id,
