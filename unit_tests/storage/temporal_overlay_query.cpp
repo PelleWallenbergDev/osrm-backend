@@ -1557,6 +1557,156 @@ BOOST_AUTO_TEST_CASE(reverse_lower_bound_target_set_matches_pointwise_minimum_of
     }
 }
 
+BOOST_AUTO_TEST_CASE(
+    bounded_reverse_expansion_matches_full_reverse_for_nodes_within_bound_and_resume_reaches_full_result)
+{
+    MockFacade facade;
+
+    const auto source_phantom = MakeZeroTraversalPhantom(0);
+    const auto target_phantom = MakeZeroTraversalPhantom(3);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 3, false};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        source_endpoints{source};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        target_endpoints{target};
+    const auto shared_query_level_policy =
+        engine::routing_algorithms::mld::temporal::overlay::detail::MakeSharedEndpointQueryLevelPolicy(
+            facade, source_endpoints, target_endpoints);
+
+    const auto full_lower_bounds =
+        engine::routing_algorithms::mld::temporal::overlay::detail::ComputeReverseLowerBoundsForTargets(
+            facade, target_endpoints, {}, shared_query_level_policy);
+
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundWorkspace
+        workspace{facade.GetNumberOfNodes()};
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundSearchStats stats;
+    engine::routing_algorithms::mld::temporal::overlay::detail::InitializeReverseLowerBoundsForTargets(
+        facade, target_endpoints, workspace, stats);
+
+    engine::routing_algorithms::mld::temporal::overlay::detail::AdvanceReverseLowerBoundsToBound(
+        facade, {}, shared_query_level_policy, workspace, stats, EdgeDuration{5});
+
+    BOOST_CHECK_EQUAL_COLLECTIONS(workspace.lower_bounds.begin(),
+                                  workspace.lower_bounds.end(),
+                                  full_lower_bounds.begin(),
+                                  full_lower_bounds.end());
+
+    const auto first_frontier =
+        engine::routing_algorithms::mld::temporal::overlay::detail::PeekNextReverseLowerBoundCost(
+            workspace);
+    BOOST_REQUIRE(first_frontier);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(*first_frontier), 10);
+
+    engine::routing_algorithms::mld::temporal::overlay::detail::AdvanceReverseLowerBoundsToBound(
+        facade, {}, shared_query_level_policy, workspace, stats, EdgeDuration{10});
+
+    BOOST_CHECK_EQUAL_COLLECTIONS(workspace.lower_bounds.begin(),
+                                  workspace.lower_bounds.end(),
+                                  full_lower_bounds.begin(),
+                                  full_lower_bounds.end());
+
+    const auto second_frontier =
+        engine::routing_algorithms::mld::temporal::overlay::detail::PeekNextReverseLowerBoundCost(
+            workspace);
+    BOOST_REQUIRE(second_frontier);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(*second_frontier), 15);
+
+    engine::routing_algorithms::mld::temporal::overlay::detail::DrainReverseLowerBounds(
+        facade, {}, shared_query_level_policy, workspace, stats);
+
+    BOOST_CHECK_EQUAL_COLLECTIONS(workspace.lower_bounds.begin(),
+                                  workspace.lower_bounds.end(),
+                                  full_lower_bounds.begin(),
+                                  full_lower_bounds.end());
+    BOOST_CHECK(!engine::routing_algorithms::mld::temporal::overlay::detail::PeekNextReverseLowerBoundCost(
+        workspace));
+}
+
+BOOST_AUTO_TEST_CASE(growing_bounded_shared_reverse_search_finds_exact_path_after_small_seed_bound)
+{
+    MockFacade facade;
+
+    const auto source_phantom = MakeZeroTraversalPhantom(0);
+    const auto target_phantom = MakeZeroTraversalPhantom(3);
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 3, false};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        source_endpoints{source};
+    const std::vector<engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint>
+        target_endpoints{target};
+    const auto shared_query_level_policy =
+        engine::routing_algorithms::mld::temporal::overlay::detail::MakeSharedEndpointQueryLevelPolicy(
+            facade, source_endpoints, target_endpoints);
+
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundWorkspace
+        workspace{facade.GetNumberOfNodes()};
+    engine::routing_algorithms::mld::temporal::overlay::detail::ReverseLowerBoundSearchStats stats;
+    engine::routing_algorithms::mld::temporal::overlay::detail::InitializeReverseLowerBoundsForTargets(
+        facade, target_endpoints, workspace, stats);
+
+    auto current_bound = EdgeDuration{4};
+    std::size_t reverse_bound_expansions = 0;
+    engine::routing_algorithms::mld::temporal::overlay::TemporalOverlayPath best_path;
+
+    while (true)
+    {
+        ++reverse_bound_expansions;
+        engine::routing_algorithms::mld::temporal::overlay::detail::AdvanceReverseLowerBoundsToBound(
+            facade, {}, shared_query_level_policy, workspace, stats, current_bound);
+
+        const auto candidate = engine::routing_algorithms::mld::temporal::overlay::Search(
+            facade,
+            source,
+            target,
+            mondayMidnightUtc(),
+            shared_query_level_policy,
+            workspace.lower_bounds);
+        if (candidate.is_valid() &&
+            (!best_path.is_valid() || candidate.total_duration < best_path.total_duration))
+        {
+            best_path = candidate;
+        }
+
+        const auto next_frontier =
+            engine::routing_algorithms::mld::temporal::overlay::detail::PeekNextReverseLowerBoundCost(
+                workspace);
+        if (best_path.is_valid() && (!next_frontier || best_path.total_duration <= *next_frontier))
+        {
+            break;
+        }
+
+        BOOST_REQUIRE(next_frontier);
+        current_bound = best_path.is_valid()
+                            ? best_path.total_duration
+                            : engine::routing_algorithms::mld::temporal::overlay::detail::
+                                  GetNextReverseLowerBoundExpansion(current_bound, *next_frontier);
+    }
+
+    const auto full_path = engine::routing_algorithms::mld::temporal::overlay::Search(
+        facade, source, target, mondayMidnightUtc(), shared_query_level_policy);
+
+    BOOST_REQUIRE(best_path.is_valid());
+    BOOST_REQUIRE(full_path.is_valid());
+    BOOST_CHECK(reverse_bound_expansions > 1U);
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(best_path.total_duration),
+                      from_alias<std::int32_t>(full_path.total_duration));
+    BOOST_REQUIRE_EQUAL(best_path.packed_path.size(), full_path.packed_path.size());
+    for (std::size_t index = 0; index < best_path.packed_path.size(); ++index)
+    {
+        BOOST_CHECK_EQUAL(best_path.packed_path[index].from, full_path.packed_path[index].from);
+        BOOST_CHECK_EQUAL(best_path.packed_path[index].to, full_path.packed_path[index].to);
+        BOOST_CHECK_EQUAL(best_path.packed_path[index].is_overlay,
+                          full_path.packed_path[index].is_overlay);
+        BOOST_CHECK_EQUAL(best_path.packed_path[index].overlay_level,
+                          full_path.packed_path[index].overlay_level);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(reverse_lower_bounds_use_incoming_shortcut_row_view)
 {
     IncomingShortcutRowOnlyFacade facade;

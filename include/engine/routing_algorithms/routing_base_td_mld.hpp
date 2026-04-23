@@ -526,6 +526,49 @@ void InitializeReverseLowerBoundsForTargets(
     }
 }
 
+inline std::optional<EdgeDuration>
+PeekNextReverseLowerBoundCost(const ReverseLowerBoundWorkspace &workspace)
+{
+    if (workspace.queue.empty())
+    {
+        return std::nullopt;
+    }
+
+    return workspace.queue.top().cost;
+}
+
+inline EdgeDuration DoubleReverseLowerBound(const EdgeDuration bound)
+{
+    if (!engine::temporal::detail::IsFiniteNonNegativeDuration(bound))
+    {
+        return INVALID_EDGE_DURATION;
+    }
+
+    const auto bound_raw = from_alias<std::int64_t>(bound);
+    const auto max_raw = from_alias<std::int64_t>(INVALID_EDGE_DURATION) - 1;
+    return to_alias<EdgeDuration>(bound_raw > max_raw / 2 ? max_raw : bound_raw * 2);
+}
+
+inline EdgeDuration
+GetNextReverseLowerBoundExpansion(const std::optional<EdgeDuration> current_bound,
+                                  const EdgeDuration frontier_cost)
+{
+    BOOST_ASSERT(engine::temporal::detail::IsFiniteNonNegativeDuration(frontier_cost));
+
+    if (!current_bound || !engine::temporal::detail::IsFiniteNonNegativeDuration(*current_bound))
+    {
+        return frontier_cost;
+    }
+
+    const auto doubled = DoubleReverseLowerBound(*current_bound);
+    if (!engine::temporal::detail::IsFiniteNonNegativeDuration(doubled))
+    {
+        return frontier_cost;
+    }
+
+    return std::max(frontier_cost, doubled);
+}
+
 template <typename FacadeT, typename QueryLevelPolicyT>
 void RelaxReverseShortcutPredecessors(const FacadeT &facade,
                                       const NodeID current_node,
@@ -662,6 +705,64 @@ void ReverseLowerBoundStep(const FacadeT &facade,
 
 template <typename FacadeT, typename QueryLevelPolicyT>
 const std::vector<EdgeDuration> &
+AdvanceReverseLowerBounds(const FacadeT &facade,
+                          const SearchRestriction &restriction,
+                          const QueryLevelPolicyT &query_level_policy,
+                          ReverseLowerBoundWorkspace &workspace,
+                          ReverseLowerBoundSearchStats &stats,
+                          const std::optional<EdgeDuration> max_cost = std::nullopt)
+{
+    const auto bounded = max_cost && engine::temporal::detail::IsFiniteNonNegativeDuration(*max_cost);
+
+    while (!workspace.queue.empty())
+    {
+        const auto current = workspace.queue.top();
+        if (current.node >= workspace.lower_bounds.size() ||
+            current.cost != workspace.lower_bounds[current.node])
+        {
+            workspace.queue.pop();
+            ++stats.queue_pops;
+            continue;
+        }
+
+        if (bounded && current.cost > *max_cost)
+        {
+            break;
+        }
+
+        ReverseLowerBoundStep(facade, restriction, query_level_policy, workspace, stats);
+    }
+
+    return workspace.lower_bounds;
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &
+AdvanceReverseLowerBoundsToBound(const FacadeT &facade,
+                                 const SearchRestriction &restriction,
+                                 const QueryLevelPolicyT &query_level_policy,
+                                 ReverseLowerBoundWorkspace &workspace,
+                                 ReverseLowerBoundSearchStats &stats,
+                                 const EdgeDuration max_cost)
+{
+    return AdvanceReverseLowerBounds(
+        facade, restriction, query_level_policy, workspace, stats, max_cost);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &
+DrainReverseLowerBounds(const FacadeT &facade,
+                        const SearchRestriction &restriction,
+                        const QueryLevelPolicyT &query_level_policy,
+                        ReverseLowerBoundWorkspace &workspace,
+                        ReverseLowerBoundSearchStats &stats)
+{
+    return AdvanceReverseLowerBounds(
+        facade, restriction, query_level_policy, workspace, stats, std::nullopt);
+}
+
+template <typename FacadeT, typename QueryLevelPolicyT>
+const std::vector<EdgeDuration> &
 RunReverseLowerBoundSearch(const FacadeT &facade,
                            const DirectedPhantomEndpoint &target,
                            const SearchRestriction &restriction,
@@ -670,13 +771,7 @@ RunReverseLowerBoundSearch(const FacadeT &facade,
                            ReverseLowerBoundSearchStats &stats)
 {
     InitializeReverseLowerBounds(facade, target, workspace, stats);
-
-    while (!workspace.queue.empty())
-    {
-        ReverseLowerBoundStep(facade, restriction, query_level_policy, workspace, stats);
-    }
-
-    return workspace.lower_bounds;
+    return DrainReverseLowerBounds(facade, restriction, query_level_policy, workspace, stats);
 }
 
 template <typename FacadeT, typename QueryLevelPolicyT>
@@ -689,13 +784,7 @@ RunReverseLowerBoundSearch(const FacadeT &facade,
                            ReverseLowerBoundSearchStats &stats)
 {
     InitializeReverseLowerBoundsForTargets(facade, targets, workspace, stats);
-
-    while (!workspace.queue.empty())
-    {
-        ReverseLowerBoundStep(facade, restriction, query_level_policy, workspace, stats);
-    }
-
-    return workspace.lower_bounds;
+    return DrainReverseLowerBounds(facade, restriction, query_level_policy, workspace, stats);
 }
 
 template <typename FacadeT, typename QueryLevelPolicyT>
