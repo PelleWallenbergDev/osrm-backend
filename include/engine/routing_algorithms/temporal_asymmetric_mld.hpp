@@ -248,15 +248,13 @@ ComputeReverseLowerBounds(const FacadeT &facade,
 }
 
 template <typename FacadeT>
-TemporalAsymmetricPath SearchWithIncomingEdges(
+TemporalAsymmetricPath SearchForwardDijkstra(
     const FacadeT &facade,
     const DirectedPhantomEndpoint &source,
     const DirectedPhantomEndpoint &target,
-    const std::time_t departure_timestamp,
-    const std::vector<std::vector<IncomingEdge>> &incoming_edges)
+    const std::time_t departure_timestamp)
 {
     TemporalAsymmetricPath best_path;
-    auto best_upper_bound = INVALID_EDGE_DURATION;
     const auto departure_clock = engine::temporal::ToTemporalClock(departure_timestamp);
 
     if (source.node == target.node)
@@ -265,15 +263,6 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
             EvaluateLocalPathDuration(facade, source, target, departure_clock);
         best_path.total_duration = local_duration;
         best_path.nodes = {source.node};
-        best_upper_bound = local_duration;
-    }
-
-    const auto reverse_lower_bounds =
-        ComputeReverseLowerBounds(facade, target, incoming_edges);
-    if (source.node >= reverse_lower_bounds.size() ||
-        reverse_lower_bounds[source.node] == INVALID_EDGE_DURATION)
-    {
-        return best_path;
     }
 
     std::vector<EdgeDuration> settled_costs(facade.GetNumberOfNodes(), INVALID_EDGE_DURATION);
@@ -294,30 +283,6 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
             continue;
         }
 
-        auto lower_bound = reverse_lower_bounds[current.node];
-        if (lower_bound == INVALID_EDGE_DURATION)
-        {
-            continue;
-        }
-
-        if (current.node == source.node && current.cost == EdgeDuration{0})
-        {
-            const auto node_lower_bound = GetNodeLowerBoundDuration(facade, source.node);
-            lower_bound = GetSourceRemainingLowerBound(facade, source);
-            lower_bound = SafeDurationAdd(
-                lower_bound,
-                engine::temporal::detail::SafeDurationSubFloorZero(
-                    reverse_lower_bounds[source.node], node_lower_bound));
-        }
-
-        const auto optimistic_total = SafeDurationAdd(current.cost, lower_bound);
-        if (best_upper_bound != INVALID_EDGE_DURATION &&
-            optimistic_total != INVALID_EDGE_DURATION &&
-            optimistic_total >= best_upper_bound)
-        {
-            continue;
-        }
-
         if (current.node == target.node &&
             (current.cost > EdgeDuration{0} || source.node != target.node))
         {
@@ -328,11 +293,8 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
             const auto candidate_total = SafeDurationAdd(current.cost, target_duration);
 
             if (candidate_total != INVALID_EDGE_DURATION &&
-                (!best_path.is_valid() || best_upper_bound == INVALID_EDGE_DURATION ||
-                 candidate_total < best_upper_bound))
+                (!best_path.is_valid() || candidate_total < best_path.total_duration))
             {
-                best_upper_bound = candidate_total;
-
                 std::vector<NodeID> nodes;
                 auto trace = current.node;
                 while (trace != SPECIAL_NODEID)
@@ -393,6 +355,18 @@ TemporalAsymmetricPath SearchWithIncomingEdges(
 
     return best_path;
 }
+
+template <typename FacadeT>
+TemporalAsymmetricPath SearchWithIncomingEdges(
+    const FacadeT &facade,
+    const DirectedPhantomEndpoint &source,
+    const DirectedPhantomEndpoint &target,
+    const std::time_t departure_timestamp,
+    const std::vector<std::vector<IncomingEdge>> &incoming_edges)
+{
+    (void)incoming_edges;
+    return SearchForwardDijkstra(facade, source, target, departure_timestamp);
+}
 } // namespace detail
 
 inline std::vector<DirectedPhantomEndpoint>
@@ -449,9 +423,18 @@ TemporalAsymmetricPath Search(const FacadeT &facade,
                               const DirectedPhantomEndpoint &target,
                               const std::time_t departure_timestamp)
 {
-    const auto incoming_edges = detail::BuildIncomingEdgeIndex(facade);
-    return detail::SearchWithIncomingEdges(
-        facade, source, target, departure_timestamp, incoming_edges);
+    return detail::SearchForwardDijkstra(facade, source, target, departure_timestamp);
+}
+
+template <typename FacadeT>
+TemporalAsymmetricPath Search(const FacadeT &facade,
+                              const DirectedPhantomEndpoint &source,
+                              const DirectedPhantomEndpoint &target,
+                              const std::time_t departure_timestamp,
+                              const EdgeDuration initial_upper_bound)
+{
+    (void)initial_upper_bound;
+    return detail::SearchForwardDijkstra(facade, source, target, departure_timestamp);
 }
 
 template <typename FacadeT>

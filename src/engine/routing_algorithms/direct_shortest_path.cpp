@@ -240,8 +240,6 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
         return {};
     }
 
-    const auto incoming_edges = mld::temporal::BuildIncomingEdgeIndex(facade);
-
     mld::temporal::TemporalAsymmetricPath best_path;
     const PhantomNode *best_source_phantom = nullptr;
     const PhantomNode *best_target_phantom = nullptr;
@@ -250,15 +248,8 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
     {
         for (const auto &target : target_endpoints)
         {
-            PhantomNodeCandidates source_candidates{*source.phantom};
-            PhantomNodeCandidates target_candidates{*target.phantom};
-            const PhantomEndpointCandidates specific_candidates{source_candidates, target_candidates};
-
-            const auto candidate = mld::temporal::Search(facade,
-                                                         source,
-                                                         target,
-                                                         departure_timestamp,
-                                                         incoming_edges);
+            const auto candidate =
+                mld::temporal::Search(facade, source, target, departure_timestamp);
 
             if (!candidate.is_valid() ||
                 (best_path.is_valid() && candidate.total_duration >= best_path.total_duration))
