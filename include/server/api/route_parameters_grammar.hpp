@@ -84,6 +84,8 @@ struct RouteParametersGrammar : public BaseParametersGrammar<Iterator, Signature
             "datasources", AnnotationsType::Datasources)("speed", AnnotationsType::Speed);
         temporal_routing_mode.add(
             "asymmetric", engine::api::RouteParameters::TemporalRoutingMode::Asymmetric)(
+            "asymmetric_optimized",
+            engine::api::RouteParameters::TemporalRoutingMode::AsymmetricOptimized)(
             "overlay_asymmetric",
             engine::api::RouteParameters::TemporalRoutingMode::OverlayAsymmetric);
 

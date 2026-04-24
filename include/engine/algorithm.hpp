@@ -45,6 +45,10 @@ struct HasTemporalAsymmetricDirectShortestPathSearch final : std::false_type
 {
 };
 template <typename AlgorithmT>
+struct HasTemporalAsymmetricOptimizedDirectShortestPathSearch final : std::false_type
+{
+};
+template <typename AlgorithmT>
 struct HasTemporalOverlayDirectShortestPathSearch final : std::false_type
 {
 };
@@ -99,6 +103,11 @@ template <> struct HasDirectShortestPathSearch<mld::Algorithm> final : std::true
 };
 template <>
 struct HasTemporalAsymmetricDirectShortestPathSearch<mld::Algorithm> final : std::true_type
+{
+};
+template <>
+struct HasTemporalAsymmetricOptimizedDirectShortestPathSearch<mld::Algorithm> final
+    : std::true_type
 {
 };
 template <>

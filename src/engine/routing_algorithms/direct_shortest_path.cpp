@@ -142,6 +142,71 @@ inline bool SharedReverseSearchComplete(const OverlayTemporalPath &best_path,
     return !next_frontier || best_path.total_duration <= *next_frontier;
 }
 
+template <typename SearchFn>
+InternalRouteResult RunTemporalAsymmetricDirectShortestPathSearch(
+    const DataFacade<mld::Algorithm> &facade,
+    const PhantomEndpointCandidates &endpoint_candidates,
+    const std::time_t departure_timestamp,
+    SearchFn &&search_fn)
+{
+    const auto source_endpoints =
+        mld::temporal::EnumerateSourceEndpoints(endpoint_candidates.source_phantoms);
+    const auto target_endpoints =
+        mld::temporal::EnumerateTargetEndpoints(endpoint_candidates.target_phantoms);
+
+    if (source_endpoints.empty() || target_endpoints.empty())
+    {
+        return {};
+    }
+
+    mld::temporal::TemporalAsymmetricPath best_path;
+    const PhantomNode *best_source_phantom = nullptr;
+    const PhantomNode *best_target_phantom = nullptr;
+
+    for (const auto &source : source_endpoints)
+    {
+        for (const auto &target : target_endpoints)
+        {
+            const auto candidate = search_fn(facade, source, target, departure_timestamp);
+
+            if (!candidate.is_valid() ||
+                (best_path.is_valid() && candidate.total_duration >= best_path.total_duration))
+            {
+                continue;
+            }
+
+            best_path = candidate;
+            best_source_phantom = source.phantom;
+            best_target_phantom = target.phantom;
+        }
+    }
+
+    if (!best_path.is_valid() || best_source_phantom == nullptr || best_target_phantom == nullptr)
+    {
+        return {};
+    }
+
+    std::vector<EdgeID> unpacked_edges;
+    if (best_path.nodes.size() > 1)
+    {
+        unpacked_edges.reserve(best_path.nodes.size() - 1);
+        util::for_each_pair(best_path.nodes.begin(),
+                            best_path.nodes.end(),
+                            [&facade, &unpacked_edges](const NodeID from, const NodeID to)
+                            { unpacked_edges.push_back(facade.FindEdge(from, to)); });
+    }
+
+    PhantomNodeCandidates source_candidates{*best_source_phantom};
+    PhantomNodeCandidates target_candidates{*best_target_phantom};
+    const PhantomEndpointCandidates best_candidates{source_candidates, target_candidates};
+
+    return extractRoute(facade,
+                        alias_cast<EdgeWeight>(best_path.total_duration),
+                        best_candidates,
+                        best_path.nodes,
+                        unpacked_edges);
+}
+
 } // namespace
 
 /// This is a stripped down version of the general shortest path algorithm.
@@ -230,63 +295,35 @@ InternalRouteResult temporalAsymmetricDirectShortestPathSearch(
     const PhantomEndpointCandidates &endpoint_candidates,
     std::time_t departure_timestamp)
 {
-    const auto source_endpoints =
-        mld::temporal::EnumerateSourceEndpoints(endpoint_candidates.source_phantoms);
-    const auto target_endpoints =
-        mld::temporal::EnumerateTargetEndpoints(endpoint_candidates.target_phantoms);
+    (void)engine_working_data;
+    return RunTemporalAsymmetricDirectShortestPathSearch(
+        facade,
+        endpoint_candidates,
+        departure_timestamp,
+        [](const auto &data_facade,
+           const auto &source,
+           const auto &target,
+           const std::time_t departure)
+        { return mld::temporal::Search(data_facade, source, target, departure); });
+}
 
-    if (source_endpoints.empty() || target_endpoints.empty())
-    {
-        return {};
-    }
-
-    mld::temporal::TemporalAsymmetricPath best_path;
-    const PhantomNode *best_source_phantom = nullptr;
-    const PhantomNode *best_target_phantom = nullptr;
-
-    for (const auto &source : source_endpoints)
-    {
-        for (const auto &target : target_endpoints)
-        {
-            const auto candidate =
-                mld::temporal::Search(facade, source, target, departure_timestamp);
-
-            if (!candidate.is_valid() ||
-                (best_path.is_valid() && candidate.total_duration >= best_path.total_duration))
-            {
-                continue;
-            }
-
-            best_path = candidate;
-            best_source_phantom = source.phantom;
-            best_target_phantom = target.phantom;
-        }
-    }
-
-    if (!best_path.is_valid() || best_source_phantom == nullptr || best_target_phantom == nullptr)
-    {
-        return {};
-    }
-
-    std::vector<EdgeID> unpacked_edges;
-    if (best_path.nodes.size() > 1)
-    {
-        unpacked_edges.reserve(best_path.nodes.size() - 1);
-        util::for_each_pair(best_path.nodes.begin(),
-                            best_path.nodes.end(),
-                            [&facade, &unpacked_edges](const NodeID from, const NodeID to)
-                            { unpacked_edges.push_back(facade.FindEdge(from, to)); });
-    }
-
-    PhantomNodeCandidates source_candidates{*best_source_phantom};
-    PhantomNodeCandidates target_candidates{*best_target_phantom};
-    const PhantomEndpointCandidates best_candidates{source_candidates, target_candidates};
-
-    return extractRoute(facade,
-                        alias_cast<EdgeWeight>(best_path.total_duration),
-                        best_candidates,
-                        best_path.nodes,
-                        unpacked_edges);
+template <>
+InternalRouteResult temporalAsymmetricOptimizedDirectShortestPathSearch(
+    SearchEngineData<mld::Algorithm> &engine_working_data,
+    const DataFacade<mld::Algorithm> &facade,
+    const PhantomEndpointCandidates &endpoint_candidates,
+    std::time_t departure_timestamp)
+{
+    (void)engine_working_data;
+    return RunTemporalAsymmetricDirectShortestPathSearch(
+        facade,
+        endpoint_candidates,
+        departure_timestamp,
+        [](const auto &data_facade,
+           const auto &source,
+           const auto &target,
+           const std::time_t departure)
+        { return mld::temporal::SearchOptimized(data_facade, source, target, departure); });
 }
 
 template <>

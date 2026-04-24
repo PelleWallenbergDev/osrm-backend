@@ -80,6 +80,7 @@ struct RouteParameters : public BaseParameters
     {
         None,
         Asymmetric,
+        AsymmetricOptimized,
         OverlayAsymmetric
     };
 

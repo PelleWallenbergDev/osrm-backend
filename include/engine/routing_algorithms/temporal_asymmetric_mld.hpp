@@ -357,6 +357,123 @@ TemporalAsymmetricPath SearchForwardDijkstra(
 }
 
 template <typename FacadeT>
+TemporalAsymmetricPath SearchOptimizedForwardDijkstra(
+    const FacadeT &facade,
+    const DirectedPhantomEndpoint &source,
+    const DirectedPhantomEndpoint &target,
+    const std::time_t departure_timestamp)
+{
+    TemporalAsymmetricPath best_path;
+    auto best_upper_bound = INVALID_EDGE_DURATION;
+    const auto departure_clock = engine::temporal::ToTemporalClock(departure_timestamp);
+
+    if (source.node == target.node)
+    {
+        const auto local_duration =
+            EvaluateLocalPathDuration(facade, source, target, departure_clock);
+        best_path.total_duration = local_duration;
+        best_path.nodes = {source.node};
+        best_upper_bound = local_duration;
+    }
+
+    std::vector<EdgeDuration> settled_costs(facade.GetNumberOfNodes(), INVALID_EDGE_DURATION);
+    std::vector<NodeID> parents(facade.GetNumberOfNodes(), SPECIAL_NODEID);
+    std::priority_queue<QueueEntry, std::vector<QueueEntry>, QueueCompare> queue;
+
+    settled_costs[source.node] = EdgeDuration{0};
+    parents[source.node] = source.node;
+    queue.push({EdgeDuration{0}, source.node});
+
+    while (!queue.empty())
+    {
+        const auto current = queue.top();
+        queue.pop();
+
+        if (current.cost != settled_costs[current.node])
+        {
+            continue;
+        }
+
+        if (best_upper_bound != INVALID_EDGE_DURATION && current.cost >= best_upper_bound)
+        {
+            continue;
+        }
+
+        if (current.node == target.node &&
+            (current.cost > EdgeDuration{0} || source.node != target.node))
+        {
+            const auto arrival_clock =
+                engine::temporal::AdvanceTemporalClock(departure_clock, current.cost);
+            const auto target_duration =
+                GetPhantomTraversalDurationAtClock(facade, target, arrival_clock);
+            const auto candidate_total = SafeDurationAdd(current.cost, target_duration);
+
+            if (candidate_total != INVALID_EDGE_DURATION &&
+                (best_upper_bound == INVALID_EDGE_DURATION || candidate_total < best_upper_bound))
+            {
+                std::vector<NodeID> nodes;
+                auto trace = current.node;
+                while (trace != SPECIAL_NODEID)
+                {
+                    nodes.push_back(trace);
+                    if (trace == parents[trace])
+                    {
+                        break;
+                    }
+                    trace = parents[trace];
+                }
+                std::reverse(nodes.begin(), nodes.end());
+                best_path.total_duration = candidate_total;
+                best_path.nodes = std::move(nodes);
+                best_upper_bound = candidate_total;
+            }
+        }
+
+        const auto current_clock =
+            engine::temporal::AdvanceTemporalClock(departure_clock, current.cost);
+        const auto node_duration =
+            current.node == source.node && current.cost == EdgeDuration{0}
+                ? GetSourceRemainingDurationAtClock(facade, source, current_clock)
+                : GetNodeDurationAtClock(facade, current.node, current_clock);
+
+        for (const auto edge : facade.GetAdjacentEdgeRange(current.node))
+        {
+            if (!facade.IsForwardEdge(edge))
+            {
+                continue;
+            }
+
+            const auto target_node = facade.GetTarget(edge);
+            if (facade.ExcludeNode(target_node))
+            {
+                continue;
+            }
+
+            const auto &edge_data = facade.GetEdgeData(edge);
+            const auto turn_penalty =
+                TurnPenaltyToDuration(facade.GetDurationPenaltyForEdgeID(edge_data.turn_id));
+            const auto edge_cost = SafeDurationAdd(node_duration, turn_penalty);
+            const auto candidate_cost = SafeDurationAdd(current.cost, edge_cost);
+
+            if (edge_cost == INVALID_EDGE_DURATION || candidate_cost == INVALID_EDGE_DURATION)
+            {
+                continue;
+            }
+
+            if (settled_costs[target_node] == INVALID_EDGE_DURATION ||
+                candidate_cost < settled_costs[target_node])
+            {
+                settled_costs[target_node] = candidate_cost;
+                parents[target_node] = current.node;
+                queue.push({candidate_cost, target_node});
+            }
+        }
+    }
+
+    return best_path;
+}
+
+template <typename FacadeT>
 TemporalAsymmetricPath SearchWithIncomingEdges(
     const FacadeT &facade,
     const DirectedPhantomEndpoint &source,
@@ -424,6 +541,15 @@ TemporalAsymmetricPath Search(const FacadeT &facade,
                               const std::time_t departure_timestamp)
 {
     return detail::SearchForwardDijkstra(facade, source, target, departure_timestamp);
+}
+
+template <typename FacadeT>
+TemporalAsymmetricPath SearchOptimized(const FacadeT &facade,
+                                       const DirectedPhantomEndpoint &source,
+                                       const DirectedPhantomEndpoint &target,
+                                       const std::time_t departure_timestamp)
+{
+    return detail::SearchOptimizedForwardDijkstra(facade, source, target, departure_timestamp);
 }
 
 template <typename FacadeT>

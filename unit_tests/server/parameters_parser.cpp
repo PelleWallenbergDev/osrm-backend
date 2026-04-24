@@ -571,14 +571,27 @@ BOOST_AUTO_TEST_CASE(valid_route_urls)
     reference_24.coordinates = coords_1;
     reference_24.departure_timestamp = std::time_t{1735689600};
     reference_24.temporal_routing_mode =
-        RouteParameters::TemporalRoutingMode::OverlayAsymmetric;
+        RouteParameters::TemporalRoutingMode::AsymmetricOptimized;
     auto result_24 = parseParameters<RouteParameters>(
-        "1,2;3,4?depart_at=1735689600&temporal_mode=overlay_asymmetric");
+        "1,2;3,4?depart_at=1735689600&temporal_mode=asymmetric_optimized");
     BOOST_CHECK(result_24);
     BOOST_REQUIRE(result_24->departure_timestamp.has_value());
     BOOST_CHECK_EQUAL(*reference_24.departure_timestamp, *result_24->departure_timestamp);
     BOOST_CHECK_EQUAL(reference_24.temporal_routing_mode, result_24->temporal_routing_mode);
     CHECK_EQUAL_RANGE(reference_24.coordinates, result_24->coordinates);
+
+    RouteParameters reference_25{};
+    reference_25.coordinates = coords_1;
+    reference_25.departure_timestamp = std::time_t{1735689600};
+    reference_25.temporal_routing_mode =
+        RouteParameters::TemporalRoutingMode::OverlayAsymmetric;
+    auto result_25 = parseParameters<RouteParameters>(
+        "1,2;3,4?depart_at=1735689600&temporal_mode=overlay_asymmetric");
+    BOOST_CHECK(result_25);
+    BOOST_REQUIRE(result_25->departure_timestamp.has_value());
+    BOOST_CHECK_EQUAL(*reference_25.departure_timestamp, *result_25->departure_timestamp);
+    BOOST_CHECK_EQUAL(reference_25.temporal_routing_mode, result_25->temporal_routing_mode);
+    CHECK_EQUAL_RANGE(reference_25.coordinates, result_25->coordinates);
 }
 
 BOOST_AUTO_TEST_CASE(valid_table_urls)

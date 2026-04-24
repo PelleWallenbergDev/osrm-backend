@@ -32,11 +32,15 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
     const auto use_temporal_asymmetric_routing =
         route_parameters.temporal_routing_mode ==
         api::RouteParameters::TemporalRoutingMode::Asymmetric;
+    const auto use_temporal_asymmetric_optimized_routing =
+        route_parameters.temporal_routing_mode ==
+        api::RouteParameters::TemporalRoutingMode::AsymmetricOptimized;
     const auto use_temporal_overlay_routing =
         route_parameters.temporal_routing_mode ==
         api::RouteParameters::TemporalRoutingMode::OverlayAsymmetric;
     const auto use_temporal_direct_routing =
-        use_temporal_asymmetric_routing || use_temporal_overlay_routing;
+        use_temporal_asymmetric_routing || use_temporal_asymmetric_optimized_routing ||
+        use_temporal_overlay_routing;
 
     if (!use_temporal_direct_routing && !algorithms.HasShortestPathSearch() &&
         route_parameters.coordinates.size() > 2)
@@ -155,6 +159,41 @@ Status ViaRoutePlugin::HandleRequest(const RoutingAlgorithmsInterface &algorithm
         }
 
         routes = algorithms.TemporalAsymmetricDirectShortestPathSearch(
+            {snapped_phantoms[0], snapped_phantoms[1]}, *route_parameters.departure_timestamp);
+    }
+    else if (use_temporal_asymmetric_optimized_routing)
+    {
+        if (!route_parameters.departure_timestamp)
+        {
+            return Error("InvalidValue",
+                         "temporal_mode=asymmetric_optimized requires depart_at.",
+                         result);
+        }
+
+        if (2 != snapped_phantoms.size())
+        {
+            return Error("NotImplemented",
+                         "temporal_mode=asymmetric_optimized currently supports only two "
+                         "coordinates.",
+                         result);
+        }
+
+        if (wants_alternatives)
+        {
+            return Error("NotImplemented",
+                         "temporal_mode=asymmetric_optimized does not support alternatives.",
+                         result);
+        }
+
+        if (!algorithms.HasTemporalAsymmetricOptimizedDirectShortestPathSearch())
+        {
+            return Error("NotImplemented",
+                         "Temporal optimized asymmetric routing is not implemented for the chosen "
+                         "search algorithm.",
+                         result);
+        }
+
+        routes = algorithms.TemporalAsymmetricOptimizedDirectShortestPathSearch(
             {snapped_phantoms[0], snapped_phantoms[1]}, *route_parameters.departure_timestamp);
     }
     else if (use_temporal_overlay_routing)
