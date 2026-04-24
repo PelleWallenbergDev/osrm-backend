@@ -184,6 +184,76 @@ BOOST_AUTO_TEST_CASE(search_handles_same_geometry_local_paths)
     BOOST_CHECK_EQUAL(result.nodes[0], 0);
 }
 
+BOOST_AUTO_TEST_CASE(optimized_search_matches_plain_search_on_temporal_choice)
+{
+    TemporalSearchFacade facade;
+    facade.static_forward_durations = {{SegmentDuration{10}},
+                                       {SegmentDuration{10}},
+                                       {SegmentDuration{20}},
+                                       {SegmentDuration{10}},
+                                       {SegmentDuration{10}}};
+    facade.forward_temporal = {{{1, 192}, EdgeDuration{100}},
+                               {{2, 192}, EdgeDuration{20}}};
+    facade.forward_temporal_min = {EdgeDuration{10},
+                                   EdgeDuration{10},
+                                   EdgeDuration{20},
+                                   EdgeDuration{10},
+                                   EdgeDuration{10}};
+    facade.turn_penalties = {TurnPenalty{0}, TurnPenalty{0}, TurnPenalty{0}, TurnPenalty{0}};
+    facade.edges = {{1, {0}, true}, {2, {1}, true}, {4, {2}, true}, {4, {3}, true}};
+    facade.edge_offsets = {0, 2, 3, 4, 4, 4};
+
+    const auto source_phantom = MakeTemporalPhantom(0, EdgeDuration{0});
+    const auto target_phantom = MakeTemporalPhantom(4, EdgeDuration{10});
+
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 4, false};
+
+    const auto plain = engine::routing_algorithms::mld::temporal::Search(
+        facade, source, target, std::time_t{1735689600});
+    const auto optimized = engine::routing_algorithms::mld::temporal::SearchOptimized(
+        facade, source, target, std::time_t{1735689600});
+
+    BOOST_REQUIRE(plain.is_valid());
+    BOOST_REQUIRE(optimized.is_valid());
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(plain.total_duration),
+                      from_alias<std::int32_t>(optimized.total_duration));
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        plain.nodes.begin(), plain.nodes.end(), optimized.nodes.begin(), optimized.nodes.end());
+}
+
+BOOST_AUTO_TEST_CASE(optimized_search_matches_plain_search_on_local_path)
+{
+    TemporalSearchFacade facade;
+    facade.static_forward_durations = {{SegmentDuration{100}}};
+    facade.forward_temporal = {{{0, 192}, EdgeDuration{100}}};
+    facade.forward_temporal_min = {EdgeDuration{100}};
+    facade.turn_penalties = {};
+    facade.edge_offsets = {0, 0};
+
+    const auto source_phantom = MakeTemporalPhantom(0, EdgeDuration{20});
+    const auto target_phantom = MakeTemporalPhantom(0, EdgeDuration{70});
+
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint source{
+        &source_phantom, 0, false};
+    const engine::routing_algorithms::mld::temporal::DirectedPhantomEndpoint target{
+        &target_phantom, 0, false};
+
+    const auto plain = engine::routing_algorithms::mld::temporal::Search(
+        facade, source, target, std::time_t{1735689600});
+    const auto optimized = engine::routing_algorithms::mld::temporal::SearchOptimized(
+        facade, source, target, std::time_t{1735689600});
+
+    BOOST_REQUIRE(plain.is_valid());
+    BOOST_REQUIRE(optimized.is_valid());
+    BOOST_CHECK_EQUAL(from_alias<std::int32_t>(plain.total_duration),
+                      from_alias<std::int32_t>(optimized.total_duration));
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        plain.nodes.begin(), plain.nodes.end(), optimized.nodes.begin(), optimized.nodes.end());
+}
+
 BOOST_AUTO_TEST_CASE(search_keeps_equal_initial_upper_bound_as_valid_solution)
 {
     TemporalSearchFacade facade;
